@@ -1,0 +1,53 @@
+<!--
+  CLAUDE.md — the pipeline reads this to decide a repo is eligible. Answer every
+  section below in under ~150 lines. The file describes the REPO; the task describes
+  the CHANGE. Keep task-specific detail out of here.
+  Delete these comments once filled in.
+-->
+
+# <Project> — worker context
+
+## Layout
+Where apps, services, models, tests, and migrations live. What is generated and
+must not be edited (e.g. OpenAPI clients, lockfiles, `*_pb2.py`).
+
+- Backend: `...`
+- Tests: `...`
+- Migrations: `...`
+- Generated / do-not-edit: `...`
+
+## Run tests
+The exact command the Stop hook uses, and how to run a single file.
+
+```bash
+# whole suite (must match TEST_CMD in the dispatcher .env):
+uv run pytest -x -q
+# one file:
+uv run pytest path/to/test_x.py -q
+```
+
+## Conventions
+- Formatter: `...`  Linter: `...`  Type-checker: `...`
+- Commit message shape: `...`
+- Branch naming: `task-<id>-<slug>` (created by the pipeline; do not rename).
+
+## Isolation
+`NTREE_WORKSPACE` and `$PORT` exist in the environment and MUST be used for anything
+that binds a port or names a database/queue.
+
+- DB name: `app_${NTREE_WORKSPACE}` (e.g. Django: `NAME = f"app_{os.environ['NTREE_WORKSPACE']}"`).
+- Redis / Celery / any shared service: prefix with `${NTREE_WORKSPACE}`.
+- Never hardcode a port; read `$PORT` (and `$PORT2`, named aliases if configured).
+
+## Do not touch
+- Existing migrations (write new ones instead).
+- `infra/`, `.env*`, vendored code, and the pipeline's own `.claude/` files.
+- Do not delete tests.
+
+## Definition of done
+Tests pass, no new lint errors, every acceptance criterion met, all changes
+committed, nothing pushed.
+
+## Blocked protocol
+If a requirement is missing or ambiguous, write `BLOCKED: <reason>` as the final
+message and stop. Never guess at a missing requirement.

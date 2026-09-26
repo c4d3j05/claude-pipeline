@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Nightly maintenance at 03:00 (spec Cleanup). Installed by scripts/install.sh. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ee.ignify.claude-pipeline.nightly</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__UV__</string>
+    <string>run</string>
+    <string>claude-pipeline</string>
+    <string>nightly</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__PIPELINE_DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__PIPELINE_DIR__/logs/nightly.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PIPELINE_DIR__/logs/nightly.err.log</string>
+</dict>
+</plist>

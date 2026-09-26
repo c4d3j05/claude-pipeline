@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Installed to ~/Library/LaunchAgents by scripts/install.sh (placeholders substituted). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ee.ignify.claude-pipeline.dispatcher</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__UV__</string>
+    <string>run</string>
+    <string>claude-pipeline</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__PIPELINE_DIR__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__PATH__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__PIPELINE_DIR__/logs/dispatcher.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PIPELINE_DIR__/logs/dispatcher.err.log</string>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
