@@ -1,0 +1,45 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "deny": [
+      "Bash(git push*)",
+      "Bash(gh pr*)",
+      "Bash(rm -rf*)",
+      "Bash(ntree*)",
+      "Edit(.ntreerc)",
+      "Edit(.claude/**)",
+      "Edit(.github/**)",
+      "Edit(.env*)",
+      "Edit(secrets/**)",
+      "Edit(infra/**)",
+      "Read(.env*)",
+      "Read(secrets/**)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "network": {
+      "allowedDomains": [
+        "api.anthropic.com",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "registry.npmjs.org"
+      ],
+      "allowLocalBinding": true
+    }
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ntree run $NTREE_WORKSPACE -- uv run pytest -x -q 2>&1 | tail -40; exit ${PIPESTATUS[0]}",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}
