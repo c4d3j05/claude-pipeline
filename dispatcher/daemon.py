@@ -189,9 +189,11 @@ class Dispatcher:
         desc = task.get("description", "") or ""
         cfg = self.cfg
 
-        # Workspace: start pristine. A leftover worktree from a prior/blocked run
-        # would otherwise be reused stale (ntree new is a no-op if it exists).
+        # Workspace: start pristine. A leftover worktree AND its branch from a
+        # prior/blocked run would otherwise be reused stale (ntree new is a no-op
+        # if the workspace exists, and reuses the old branch off a stale base).
         self.ntree.rm(slug)
+        self.ntree.remove_branch(slug)
         worktree = self.ntree.new(slug)
         self.ledger.update(tid, state="working", workspace=slug, pid=os.getpid())
 

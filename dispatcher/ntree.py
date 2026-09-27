@@ -58,6 +58,21 @@ class Ntree:
         if cp.returncode != 0:
             log.warning("ntree rm %s: %s", slug, cp.stderr.strip() or cp.stdout.strip())
 
+    def remove_branch(self, slug: str) -> None:
+        """Delete the git branch left behind by `ntree rm` (it removes only the worktree).
+
+        Without this, a re-created workspace reuses the stale branch instead of
+        re-forking from the base, so it never sees new commits on the base branch.
+        """
+        cp = subprocess.run(
+            ["git", "branch", "-D", slug],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+        )
+        if cp.returncode == 0:
+            log.debug("deleted stale branch %s", slug)
+
     def doctor(self) -> subprocess.CompletedProcess:
         return self._run(["doctor"], timeout=300)
 
