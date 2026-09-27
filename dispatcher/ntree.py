@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 from .log import get
+from .procenv import clean_env
 
 log = get("ntree")
 
@@ -32,6 +33,7 @@ class Ntree:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=clean_env(),
         )
 
     def new(self, slug: str) -> Path:
@@ -57,6 +59,21 @@ class Ntree:
         cp = self._run(["rm", slug, "--force"], timeout=300)
         if cp.returncode != 0:
             log.warning("ntree rm %s: %s", slug, cp.stderr.strip() or cp.stdout.strip())
+
+    def remove_branch(self, slug: str) -> None:
+        """Delete the git branch left behind by `ntree rm` (it removes only the worktree).
+
+        Without this, a re-created workspace reuses the stale branch instead of
+        re-forking from the base, so it never sees new commits on the base branch.
+        """
+        cp = subprocess.run(
+            ["git", "branch", "-D", slug],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+        )
+        if cp.returncode == 0:
+            log.debug("deleted stale branch %s", slug)
 
     def doctor(self) -> subprocess.CompletedProcess:
         return self._run(["doctor"], timeout=300)

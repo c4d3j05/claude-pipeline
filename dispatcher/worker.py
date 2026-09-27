@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from .log import get
+from .procenv import clean_env
 from .stream import SessionResult, parse_event
 
 log = get("worker")
@@ -67,6 +68,7 @@ def launch(
             text=True,
             bufsize=1,
             start_new_session=True,  # own process group, so we can kill children too
+            env=clean_env(),
         )
         assert proc.stdout is not None
         try:

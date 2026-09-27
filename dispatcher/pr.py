@@ -67,6 +67,17 @@ _Session `{session_id}` · cost ${cost_usd:.2f} · opened by claude-pipeline._
 """
 
 
+def _ensure_label(cfg: Config, name: str, color: str, desc: str) -> None:
+    """Create a GitHub label if it doesn't already exist (idempotent, best-effort)."""
+    subprocess.run(
+        ["gh", "label", "create", name, "--color", color, "--description", desc, "--force"],
+        cwd=cfg.repo_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
 def push_and_create(
     *,
     cfg: Config,
@@ -83,6 +94,11 @@ def push_and_create(
 
     body_file = worktree / "pr-body.md"
     body_file.write_text(body)
+
+    # `gh pr create --label` fails if the label doesn't exist in the repo; ensure it.
+    _ensure_label(cfg, cfg.pr_label, "5319e7", "Opened by claude-pipeline")
+    if needs_qa:
+        _ensure_label(cfg, "needs-qa", "d93f0b", "Needs manual QA")
 
     args = [
         "gh", "pr", "create",
@@ -109,7 +125,7 @@ def open_worker_prs(cfg: Config) -> list[dict]:
             "gh", "pr", "list",
             "--label", cfg.pr_label,
             "--state", "all",
-            "--json", "number,state,headRefName,url,mergedAt",
+            "--json", "number,state,headRefName,url,mergedAt,mergeCommit",
             "--limit", "100",
         ],
         cwd=cfg.repo_path,

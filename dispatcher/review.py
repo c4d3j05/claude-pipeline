@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -17,7 +18,7 @@ log = get("review")
 
 def run_tests(cfg: Config, ntree: Ntree, slug: str) -> tuple[bool, str]:
     """Run the gate's test command inside the worktree. Returns (green, tail)."""
-    cp = ntree.run(slug, cfg.test_cmd.split(), timeout=cfg.wall_clock_limit_min * 60)
+    cp = ntree.run(slug, shlex.split(cfg.test_cmd), timeout=cfg.wall_clock_limit_min * 60)
     output = (cp.stdout or "") + (cp.stderr or "")
     tail = "\n".join(output.splitlines()[-40:])
     return cp.returncode == 0, tail
