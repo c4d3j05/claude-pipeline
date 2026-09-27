@@ -73,6 +73,23 @@ uv run claude-pipeline run                # foreground
 | `cleanup` | Run one PR-close cleanup pass (teardown + Vikunja Done/Blocked) and exit. |
 | `nightly` | Run the nightly maintenance pass (`ntree doctor` + report). |
 | `prepare-repo` | Drop `worker-settings.json` + `CLAUDE.md` template into `TARGET_REPO_PATH`. |
+| `dashboard` | Terminal control panel: live worker status + edit config + pause/retry/cancel (`--once` for a one-shot text snapshot). |
+
+## Dashboard
+
+A Textual TUI control panel (`uv sync --group dashboard` once to install it):
+
+```bash
+uv run claude-pipeline dashboard          # interactive TUI
+uv run claude-pipeline dashboard --once   # one-shot text status (no TUI)
+```
+
+It reads the same SQLite ledger the daemon writes, so status is always accurate.
+Keys: `p` pause/resume dispatching · `r` retry a blocked task · `c` cancel an in-flight
+task · `o` open the selected PR · `e` edit config · `q` quit. Config edits (`MAX_WORKERS`,
+`DAILY_CAP_USD`, `POLL_INTERVAL`, models, permission mode) are written to `.env` and the
+daemon **hot-reloads them each tick** — no restart, no interrupted workers. Controls go
+through a `control` row / `cancel_requested` flag in the ledger that the daemon honors.
 
 ## Authoring tasks
 

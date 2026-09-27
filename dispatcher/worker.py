@@ -26,6 +26,7 @@ def launch(
     permission_mode: str = "acceptEdits",
     read_only: bool = False,
     resume_session: str = "",
+    on_pid=None,
 ) -> tuple[SessionResult, int]:
     """Run `claude -p` in `worktree`, tee the stream to `session_log`, and parse it.
 
@@ -70,6 +71,8 @@ def launch(
             start_new_session=True,  # own process group, so we can kill children too
             env=clean_env(),
         )
+        if on_pid:
+            on_pid(proc.pid)
         assert proc.stdout is not None
         try:
             for line in proc.stdout:

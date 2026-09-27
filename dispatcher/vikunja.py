@@ -100,6 +100,9 @@ class Vikunja:
     def comment(self, task_id: int, text: str) -> None:
         self._req("PUT", f"/tasks/{task_id}/comments", json={"comment": text})
 
+    def delete_comment(self, task_id: int, comment_id: int) -> None:
+        self._req("DELETE", f"/tasks/{task_id}/comments/{comment_id}")
+
     # --- labels ----------------------------------------------------------
     def labels(self) -> list[dict]:
         return self._req("GET", "/labels") or []

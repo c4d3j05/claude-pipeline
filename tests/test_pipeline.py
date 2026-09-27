@@ -5,7 +5,8 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from dispatcher import prompt, stream
+from dispatcher import config as cfgmod
+from dispatcher import dashboard, prompt, stream
 from dispatcher.cleanup import task_id_from_branch
 from dispatcher.db import Ledger
 
@@ -82,4 +83,54 @@ def test_ledger_cost_and_state():
         assert led.cap_already_notified()
         led.update(1, state="done")
         assert led.active_count() == 0
+        led.close()
+
+
+# --- control: pause + cancel -------------------------------------------
+def test_ledger_pause_and_cancel():
+    with tempfile.TemporaryDirectory() as d:
+        led = Ledger(Path(d) / "t.db")
+        assert led.is_paused() is False
+        led.set_paused(True)
+        assert led.is_paused() is True
+        led.upsert_claim(7, "task-7-x", "task-7-x")
+        led.update(7, state="working")
+        assert led.cancel_requested(7) is False
+        led.request_cancel(7)
+        assert led.cancel_requested(7) is True
+        assert [r["task_id"] for r in led.pending_cancels()] == [7]
+        led.delete_task(7)
+        assert led.get(7) is None
+        led.close()
+
+
+# --- config hot-reload + .env editing ----------------------------------
+def test_config_file_wins_and_set_values():
+    with tempfile.TemporaryDirectory() as d:
+        envf = Path(d) / ".env"
+        envf.write_text("MAX_WORKERS=2\nDAILY_CAP_USD=25\nVIKUNJA_PROJECT_ID=49\n")
+        cfg = cfgmod.load(str(envf))
+        assert cfg.max_workers == 2 and cfg.daily_cap_usd == 25.0 and cfg.project_id == 49
+        # Editing the file changes what the next load() sees (hot-reload path).
+        cfgmod.set_values(str(envf), {"MAX_WORKERS": "5"})
+        assert cfgmod.load(str(envf)).max_workers == 5
+        # set_values preserves the other keys.
+        assert cfgmod.load(str(envf)).project_id == 49
+
+
+# --- dashboard status gathering ----------------------------------------
+def test_gather_status_and_snapshot():
+    with tempfile.TemporaryDirectory() as d:
+        envf = Path(d) / ".env"
+        envf.write_text("MAX_WORKERS=2\nDAILY_CAP_USD=25\n")
+        cfg = cfgmod.load(str(envf))
+        led = Ledger(Path(d) / "t.db")
+        led.upsert_claim(650, "task-650-x", "task-650-x")
+        led.update(650, state="working")
+        led.add_cost(650, 0.5)
+        st = dashboard.gather_status(cfg, led, logs_root=Path(d))
+        assert st["active"] == 1 and st["max_workers"] == 2
+        assert st["tasks"][0]["task_id"] == 650
+        text = dashboard.snapshot_text(cfg, led, logs_root=Path(d))
+        assert "650" in text and "working" in text
         led.close()

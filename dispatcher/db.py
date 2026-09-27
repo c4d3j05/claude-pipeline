@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS daily_cost (
     cost_usd     REAL NOT NULL DEFAULT 0,
     cap_notified INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS control (
+    id     INTEGER PRIMARY KEY CHECK (id = 1),
+    paused INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO control (id, paused) VALUES (1, 0);
 """
 
 ACTIVE_STATES = ("claimed", "working", "testing", "reviewing")
@@ -53,9 +59,18 @@ class Ledger:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")  # tolerate TUI/daemon concurrent writes
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
         self._lock = threading.RLock()
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)")}
+        if "cancel_requested" not in cols:
+            self.conn.execute(
+                "ALTER TABLE tasks ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+            )
 
     # --- tasks -----------------------------------------------------------
     def upsert_claim(self, task_id: int, slug: str, branch: str) -> None:
@@ -142,6 +157,46 @@ class Ledger:
                    ON CONFLICT(day) DO UPDATE SET cap_notified=1""",
                 (_today(),),
             )
+            self.conn.commit()
+
+    def all_tasks(self) -> list[sqlite3.Row]:
+        with self._lock:
+            return self.conn.execute(
+                "SELECT * FROM tasks ORDER BY task_id"
+            ).fetchall()
+
+    # --- control (pause / cancel) ---------------------------------------
+    def is_paused(self) -> bool:
+        with self._lock:
+            row = self.conn.execute("SELECT paused FROM control WHERE id=1").fetchone()
+            return bool(row and row["paused"])
+
+    def set_paused(self, paused: bool) -> None:
+        with self._lock:
+            self.conn.execute("UPDATE control SET paused=? WHERE id=1", (1 if paused else 0,))
+            self.conn.commit()
+
+    def request_cancel(self, task_id: int) -> None:
+        self.update(task_id, cancel_requested=1)
+
+    def clear_cancel(self, task_id: int) -> None:
+        self.update(task_id, cancel_requested=0)
+
+    def cancel_requested(self, task_id: int) -> bool:
+        row = self.get(task_id)
+        return bool(row and row["cancel_requested"])
+
+    def pending_cancels(self) -> list[sqlite3.Row]:
+        q = ",".join("?" * len(ACTIVE_STATES))
+        with self._lock:
+            return self.conn.execute(
+                f"SELECT * FROM tasks WHERE cancel_requested=1 AND state IN ({q})",
+                ACTIVE_STATES,
+            ).fetchall()
+
+    def delete_task(self, task_id: int) -> None:
+        with self._lock:
+            self.conn.execute("DELETE FROM tasks WHERE task_id=?", (task_id,))
             self.conn.commit()
 
     def close(self) -> None:

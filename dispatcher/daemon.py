@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import config as cfgmod
 from . import pr as prmod
 from .cleanup import process_closed_prs
 from .config import Config
@@ -33,14 +34,20 @@ log = get("daemon")
 CLEANUP_INTERVAL = 300  # poll open PRs every 5 min
 
 
+POOL_CEILING = 32  # hard cap on threads; live concurrency is gated by cfg.max_workers
+
+
 class Dispatcher:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, env_file: str = ".env"):
         self.cfg = cfg
+        self.env_file = env_file
         self.vk = Vikunja(cfg.vikunja_url, cfg.vikunja_token)
         self.ledger = Ledger(cfg.db_path)
         self.slack = Slack(cfg.slack_webhook)
         self.ntree = Ntree(cfg.repo_path, cfg.base_branch)
-        self.pool = ThreadPoolExecutor(max_workers=cfg.max_workers, thread_name_prefix="worker")
+        # Pool has a fixed ceiling; the tick gate limits real concurrency to
+        # cfg.max_workers, so changing MAX_WORKERS live (hot-reload) takes effect.
+        self.pool = ThreadPoolExecutor(max_workers=POOL_CEILING, thread_name_prefix="worker")
         self.logs_root = Path("logs")
         self.view_id = 0
         self.buckets: dict[str, dict] = {}
@@ -100,12 +107,39 @@ class Dispatcher:
         self.pool.shutdown(wait=True)
         self.ledger.close()
 
+    def _reload_config(self) -> None:
+        """Hot-reload the operational knobs from .env (dashboard edits them live).
+
+        Structural fields (Vikunja URL/token/project, DB path, repo) keep their
+        startup values; only the HOT_KEYS take effect without a restart.
+        """
+        try:
+            self.cfg = cfgmod.load(self.env_file)
+        except Exception:  # noqa: BLE001
+            log.warning("config reload failed; keeping current config")
+
+    def _honor_cancels(self) -> None:
+        for row in self.ledger.pending_cancels():
+            pid = row["pid"]
+            if pid and _pid_alive(pid) and pid != os.getpid():
+                log.warning("cancel requested for task %s — killing worker pid %s",
+                            row["task_id"], pid)
+                _kill_pgid(pid)
+            # run_pipeline will see cancel_requested after the worker dies and finalize.
+
     def tick(self) -> None:
+        self._reload_config()
+        self._honor_cancels()
+
         now = time.monotonic()
         if now - self._last_cleanup >= CLEANUP_INTERVAL:
             self._last_cleanup = now
             self.refresh_board()
             process_closed_prs(self.cfg, self.ledger, self.ntree, self.vk, self.buckets, self.slack)
+
+        # Operator pause (from the dashboard): keep running workers, stop claiming.
+        if self.ledger.is_paused():
+            return
 
         # Budget: stop claiming when the daily cap is reached.
         spent = self.ledger.today_cost()
@@ -208,11 +242,14 @@ class Dispatcher:
             wall_clock_limit_min=cfg.wall_clock_limit_min,
             model=cfg.worker_model,
             permission_mode=cfg.permission_mode,
+            on_pid=lambda p: self.ledger.update(tid, pid=p),
         )
         self._account_cost(tid, result)
         self.comment(tid, f"dispatched: session={result.session_id} pid={os.getpid()} workspace={slug}")
         session_id = result.session_id
 
+        if self.ledger.cancel_requested(tid):
+            return self._cancelled(tid, slug)
         reason = blocked_reason(result)
         if reason:
             return self._block(tid, reason)
@@ -230,8 +267,10 @@ class Dispatcher:
             n = row["test_retries"] + 1
             self.ledger.update(tid, test_retries=n)
             self.comment(tid, f"gate: tests red, retry {n}/{cfg.max_test_retries}")
-            result, rc = self._resume(worktree, slug, session_id, retry_prompt_tests(tail), "session.jsonl")
+            result, rc = self._resume(tid, worktree, slug, session_id, retry_prompt_tests(tail), "session.jsonl")
             self._account_cost(tid, result)
+            if self.ledger.cancel_requested(tid):
+                return self._cancelled(tid, slug)
             cap = self._cap_hit(result, rc)
             if cap:
                 return self._block(tid, cap)
@@ -239,7 +278,7 @@ class Dispatcher:
 
         # Working-tree check: uncommitted changes -> one more turn.
         if working_tree_dirty(worktree):
-            result, rc = self._resume(worktree, slug, session_id, commit_or_discard_prompt(), "session.jsonl")
+            result, rc = self._resume(tid, worktree, slug, session_id, commit_or_discard_prompt(), "session.jsonl")
             self._account_cost(tid, result)
             if working_tree_dirty(worktree):
                 return self._block(tid, "gate: uncommitted changes after commit-or-discard turn")
@@ -258,9 +297,11 @@ class Dispatcher:
             self.ledger.update(tid, review_retries=n)
             self.comment(tid, "gate: review blocking, retry")
             result, rc = self._resume(
-                worktree, slug, session_id, retry_prompt_review(review.get("findings", [])), "session.jsonl"
+                tid, worktree, slug, session_id, retry_prompt_review(review.get("findings", [])), "session.jsonl"
             )
             self._account_cost(tid, result)
+            if self.ledger.cancel_requested(tid):
+                return self._cancelled(tid, slug)
             cap = self._cap_hit(result, rc)
             if cap:
                 return self._block(tid, cap)
@@ -287,7 +328,7 @@ class Dispatcher:
         self.slack.pr_opened(tid, pr_url)
         log.info("task %s -> PR %s", tid, pr_url)
 
-    def _resume(self, worktree, slug, session_id, prompt, logname):
+    def _resume(self, tid, worktree, slug, session_id, prompt, logname):
         return launch(
             worktree=worktree,
             prompt=prompt,
@@ -298,7 +339,21 @@ class Dispatcher:
             model=self.cfg.worker_model,
             permission_mode=self.cfg.permission_mode,
             resume_session=session_id,
+            on_pid=lambda p: self.ledger.update(tid, pid=p),
         )
+
+    def _cancelled(self, task_id: int, slug: str) -> None:
+        log.warning("task %s cancelled by operator", task_id)
+        self.ledger.clear_cancel(task_id)
+        _safe_call(lambda: self.ntree.rm(slug))
+        _safe_call(lambda: self.ntree.remove_branch(slug))
+        try:
+            self.move(task_id, "blocked")
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not move cancelled task %s to blocked: %s", task_id, e)
+        self.comment(task_id, "blocked: cancelled by operator")
+        self.ledger.update(task_id, state="blocked")
+        self.slack.task_blocked(task_id, "cancelled by operator", self.task_link(task_id))
 
     def _block(self, task_id: int, reason: str) -> None:
         log.warning("task %s blocked: %s", task_id, reason)
@@ -331,6 +386,22 @@ def _fmt_findings(findings: list[dict]) -> str:
         f"- [{f.get('severity','?')}] {f.get('file','?')}:{f.get('line','?')} — {f.get('note','')}"
         for f in findings
     ) or "(no details)"
+
+
+def _safe_call(fn) -> None:
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001
+        log.warning("teardown step failed: %s", e)
+
+
+def _kill_pgid(pid: int) -> None:
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        time.sleep(2)
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _pid_alive(pid: int) -> bool:

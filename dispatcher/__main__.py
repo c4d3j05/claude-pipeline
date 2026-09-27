@@ -41,8 +41,21 @@ def cmd_run(args) -> int:
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
         return 2
-    Dispatcher(cfg).run()
+    Dispatcher(cfg, args.env).run()
     return 0
+
+
+def cmd_dashboard(args) -> int:
+    cfg = _load(args.env)
+    if args.once:
+        from .dashboard import snapshot_text
+        from .db import Ledger
+
+        print(snapshot_text(cfg, Ledger(cfg.db_path)))
+        return 0
+    from . import dashboard
+
+    return dashboard.run(args.env)
 
 
 def cmd_selftest(args) -> int:
@@ -142,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("selftest", help="verify config and connectivity").set_defaults(func=cmd_selftest)
     sub.add_parser("cleanup", help="run one PR-close cleanup pass").set_defaults(func=cmd_cleanup)
     sub.add_parser("nightly", help="run the nightly maintenance pass").set_defaults(func=cmd_nightly)
+    dash = sub.add_parser("dashboard", help="terminal control panel (status + config + controls)")
+    dash.add_argument("--once", action="store_true", help="print a one-shot text status and exit (no TUI)")
+    dash.set_defaults(func=cmd_dashboard)
     pr = sub.add_parser("prepare-repo", help="install worker-settings.json + CLAUDE.md into target repo")
     pr.add_argument("--force", action="store_true", help="overwrite an existing CLAUDE.md")
     pr.set_defaults(func=cmd_prepare_repo)
