@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 from .log import get
+from .procenv import clean_env
 
 log = get("ntree")
 
@@ -32,6 +33,7 @@ class Ntree:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=clean_env(),
         )
 
     def new(self, slug: str) -> Path:
