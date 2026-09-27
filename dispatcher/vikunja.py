@@ -53,8 +53,16 @@ class Vikunja:
         raise VikunjaError(f"project {project_id} has no kanban view")
 
     def buckets(self, project_id: int, view_id: int) -> list[dict]:
-        """Buckets for a view. Each bucket embeds its `tasks` (omitted when empty)."""
+        """Bucket metadata (id/title/limit) for a view. Does NOT embed tasks."""
         return self._req("GET", f"/projects/{project_id}/views/{view_id}/buckets") or []
+
+    def board(self, project_id: int, view_id: int) -> list[dict]:
+        """The kanban board: a list of buckets, each with an embedded `tasks` array.
+
+        The `/buckets` endpoint returns bucket metadata only; the per-view
+        `/tasks` endpoint is what carries tasks grouped into their buckets.
+        """
+        return self._req("GET", f"/projects/{project_id}/views/{view_id}/tasks") or []
 
     def bucket_map(self, project_id: int, view_id: int) -> dict[str, dict]:
         """Map lowercased bucket title -> bucket dict."""

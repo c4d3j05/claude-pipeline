@@ -125,9 +125,9 @@ class Dispatcher:
 
     def ready_tasks(self, limit: int) -> list[dict]:
         """Tasks in the ready bucket carrying the claude label, not already claimed."""
-        buckets = self.vk.buckets(self.cfg.project_id, self.view_id)
+        board = self.vk.board(self.cfg.project_id, self.view_id)
         ready = next(
-            (b for b in buckets if b["title"].strip().lower() == self.cfg.bucket_ready.strip().lower()),
+            (b for b in board if b["title"].strip().lower() == self.cfg.bucket_ready.strip().lower()),
             None,
         )
         if not ready:
