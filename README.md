@@ -74,6 +74,12 @@ uv run claude-pipeline run                # foreground
 | `nightly` | Run the nightly maintenance pass (`ntree doctor` + report). |
 | `prepare-repo` | Drop `worker-settings.json` + `CLAUDE.md` template into `TARGET_REPO_PATH`. |
 
+## Authoring tasks
+
+How to scope and structure tasks so a batch runs in parallel safely (conflicts surface at
+*merge*, so scoping is everything) and each task yields a clean PR:
+**[`AUTHORING.md`](AUTHORING.md)** — includes a copy-paste ticket template.
+
 ## Configuration
 
 All via `.env` (see [`.env.example`](.env.example)). Key knobs: `MAX_WORKERS` (4),
