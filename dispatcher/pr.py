@@ -125,7 +125,7 @@ def open_worker_prs(cfg: Config) -> list[dict]:
             "gh", "pr", "list",
             "--label", cfg.pr_label,
             "--state", "all",
-            "--json", "number,state,headRefName,url,mergedAt",
+            "--json", "number,state,headRefName,url,mergedAt,mergeCommit",
             "--limit", "100",
         ],
         cwd=cfg.repo_path,

@@ -37,6 +37,14 @@ def _dropdb(slug: str) -> None:
         log.debug("dropdb not on PATH; skipping drop of %s", db)
 
 
+def _safe(label: str, slug: str, fn) -> None:
+    """Run a teardown step; log and swallow any failure so the task still finishes."""
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001
+        log.warning("teardown step '%s' failed for %s: %s", label, slug, e)
+
+
 def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, buckets, slack: Slack) -> None:
     """Poll worker PRs; for any that closed, tear down and update Vikunja.
 
@@ -61,26 +69,21 @@ def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, bucke
 
         # Resource teardown — each step best-effort so one failure can't strand the
         # task (the Vikunja move + ledger update below MUST still run, else we loop).
-        def _branch_delete():
-            subprocess.run(["git", "branch", "-D", branch], cwd=cfg.repo_path,
-                           capture_output=True, text=True)
-
-        for label, step in (
-            ("ntree rm", lambda: ntree.rm(slug)),      # stops process, frees ports, removes worktree
-            ("dropdb", lambda: _dropdb(slug)),          # drop per-workspace DB
-            ("branch delete", _branch_delete),          # remote deleted by GitHub auto-delete
-        ):
-            try:
-                step()
-            except Exception as e:  # noqa: BLE001
-                log.warning("teardown step '%s' failed for %s: %s", label, slug, e)
+        _safe("ntree rm", slug, lambda slug=slug: ntree.rm(slug))       # frees ports, removes worktree
+        _safe("dropdb", slug, lambda slug=slug: _dropdb(slug))          # drop per-workspace DB
+        _safe("branch -D", slug, lambda branch=branch: subprocess.run(  # local branch
+            ["git", "branch", "-D", branch], cwd=cfg.repo_path, capture_output=True, text=True))
+        _safe("push --delete", slug, lambda branch=branch: subprocess.run(  # remote (if auto-delete off)
+            ["git", "push", "origin", "--delete", branch], cwd=cfg.repo_path,
+            capture_output=True, text=True))
 
         # Vikunja: move + comment
         target = buckets["done"] if merged else buckets["blocked"]
         try:
             vikunja.move_task(cfg.project_id, target["project_view_id"], target["id"], task_id)
-            sha = pr.get("mergeCommit", {}).get("oid", "") if isinstance(pr.get("mergeCommit"), dict) else ""
-            note = f"merged: {sha}" if merged else "closed without merge"
+            mc = pr.get("mergeCommit")
+            sha = (mc.get("oid", "")[:9] if isinstance(mc, dict) else "")
+            note = f"merged: {sha}".strip() if merged else "closed without merge"
             vikunja.comment(task_id, f"<p>{note} ({pr.get('url')})</p>")
         except Exception as e:  # noqa: BLE001
             log.warning("vikunja update on close failed for task %s: %s", task_id, e)
