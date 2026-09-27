@@ -5,8 +5,9 @@ set -euo pipefail
 PIPELINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UV="$(command -v uv)"
 AGENTS="$HOME/Library/LaunchAgents"
-# Give launchd the same PATH the daemon needs (uv, ntree, gh, claude, git).
-DAEMON_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
+# Give launchd the same PATH the daemon (and its worker subprocesses) need:
+# uv, ntree, gh, claude, git (Homebrew), poetry (pyenv shims), docker (/usr/local/bin).
+DAEMON_PATH="$HOME/.pyenv/shims:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin"
 
 mkdir -p "$AGENTS" "$PIPELINE_DIR/logs"
 
