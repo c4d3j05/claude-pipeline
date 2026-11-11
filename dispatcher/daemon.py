@@ -19,7 +19,7 @@ from .cleanup import process_closed_prs, sync_deleted_tasks, watch_open_prs
 from .config import Config
 from .db import ACTIVE_STATES, Ledger
 from .log import get
-from .notify import Slack
+from .notify import Slack, next_step
 from .ntree import Ntree, NtreeError
 from .proc import kill_group
 from .procenv import load_env_file
@@ -368,7 +368,11 @@ class Dispatcher:
         reason = blocked_reason(result)
         if reason:
             return ("block", reason)
-        cap = self._cap_hit(result, rc) or self._over_task_budget(tid)
+        cap = self._cap_hit(result, rc)
+        over = self._over_task_budget(tid)
+        if cap and over and cap.startswith("cap: turns"):
+            cap += " and " + over.removeprefix("cap: ")   # say both, not just the first that hit
+        cap = cap or over
         if cap and cap.startswith("worker error") and _AUTH.search(cap):
             self.ledger.set_paused(True)
             self.slack.alert(f"credentials problem ({cap[:120]}); dispatching is PAUSED — "
@@ -621,9 +625,15 @@ class Dispatcher:
             self.move(task_id, "blocked")
         except Exception as e:  # noqa: BLE001
             log.warning("could not move task %s to blocked: %s", task_id, e)
-        self.comment(task_id, f"blocked: {reason}")
         self.ledger.update(task_id, state="blocked")
-        self.slack.task_blocked(task_id, reason, self.task_link(task_id))
+        row = self.ledger.get(task_id)
+        cost = row["cost_usd"] if row else None
+        resumable = bool(row and row["resumable"])
+        spent = f"<br>Spent ${cost:.2f} this attempt. " if cost is not None else "<br>"
+        self.comment(task_id, f"blocked: {reason}{spent}{next_step(reason, resumable)}")
+        self.slack.task_blocked(
+            task_id, reason, self.task_link(task_id), slug=row["slug"] if row else "",
+            cost=cost, lifetime=row["lifetime_cost"] if row else None, resumable=resumable)
 
     # --- restart recovery ------------------------------------------------
     def reap_orphans(self) -> None:

@@ -350,7 +350,7 @@ def pipeline(tmp_path, repo, fake_bin, monkeypatch):
     events = {"moved": [], "comments": [], "prs": [], "slack": []}
     d.move = lambda tid, key: events["moved"].append(key)
     d.comment = lambda tid, text: events["comments"].append(text)
-    d.slack.task_blocked = lambda *a: events["slack"].append(a)
+    d.slack.task_blocked = lambda *a, **k: events["slack"].append(a)
     d.slack.pr_opened = lambda *a: events["slack"].append(a)
     monkeypatch.setattr(d.ntree, "base_ref", lambda: "main")
     monkeypatch.setattr(d.ntree, "rm", lambda s: None)
@@ -1538,3 +1538,122 @@ def test_tui_enter_opens_the_detail_screen_and_escape_closes_it(tmp_path):
             return opened, body, isinstance(app.screen, DetailScreen)
     opened, body, still_open = asyncio.run(run())
     assert opened and "Task #3" in body and "WORKING" in body and not still_open
+
+
+# =====================================================================================
+# Slack: a blocked message that says what to do, and a merged message
+# =====================================================================================
+class _Cap:
+    """Captures what would be posted to Slack."""
+
+    def __init__(self):
+        self.posts = []
+
+    def post(self, text):
+        self.posts.append(text)
+
+
+def _slack(cap):
+    from dispatcher.notify import Slack
+
+    s = Slack("https://hooks.invalid/x")
+    s.post = cap.post
+    return s
+
+
+def test_blocked_message_says_why_how_much_and_what_to_do_next():
+    cap = _Cap()
+    _slack(cap).task_blocked(819, "cap: turns=60 and task cost $16.55 >= $15.00", "https://v/tasks/819",
+                             slug="task-819-calendly", cost=16.55, lifetime=22.5, resumable=True)
+    text = cap.posts[0]
+    for needle in ("Task 819 *blocked* (task-819-calendly)", "*Why:* cap: turns=60 and task cost $16.55",
+                   "*Spent:* $16.55 this attempt ($22.50 over the task's life)",
+                   "work is saved", "resume the same session", "https://v/tasks/819"):
+        assert needle in text, needle
+
+
+def test_next_step_depends_on_why_the_task_stopped():
+    from dispatcher.notify import next_step
+
+    assert "resume the same session" in next_step("cap: turns=60", True)
+    assert "from scratch" in next_step("gate: tests red", False)
+    assert "base branch already fails" in next_step("baseline red: tests already fail on main", False)
+    assert "Fix the login" in next_step("worker error (rc=1): Not logged in — dispatching paused until "
+                                        "credentials are fixed", False)
+
+
+def test_old_style_blocked_call_still_works_for_cancels():
+    cap = _Cap()
+    _slack(cap).task_blocked(5, "cancelled by operator", "https://v/tasks/5")
+    assert "Task 5 *blocked*" in cap.posts[0] and "Spent" not in cap.posts[0]
+
+
+def test_merged_message():
+    cap = _Cap()
+    _slack(cap).task_merged(818, "https://gh/pr/616", 2.57, 5.67)
+    text = cap.posts[0]
+    assert "Task 818 *merged*: https://gh/pr/616" in text
+    assert "$2.57 this attempt ($5.67 over the task's life)" in text and "Card moved to Done" in text
+    cap2 = _Cap()
+    _slack(cap2).task_merged(1, "https://gh/pr/1", 3.0, 3.0)
+    assert "over the task's life" not in cap2.posts[0]                 # no noise when they match
+
+
+def test_block_posts_to_slack_and_comments_the_card_with_cost_and_next_step(tmp_path):
+    d = _dispatcher(tmp_path)
+    cap = _Cap()
+    d.slack = _slack(cap)
+    comments = []
+    d.move = lambda *a: None
+    d.comment = lambda tid, text: comments.append(text)
+    d.ledger.upsert_claim(1, "task-1-x", "task-1-x")
+    d.ledger.add_cost(1, 4.2)
+    d._block(1, "cap: turns=60")
+    assert d.ledger.get(1)["resumable"] == 1
+    assert "Spent:* $4.20" in cap.posts[0] and "resume the same session" in cap.posts[0]
+    assert comments[0].startswith("blocked: cap: turns=60<br>Spent $4.20 this attempt.")
+    assert "resume the same session" in comments[0]
+    d._block(1, "gate: tests red")                                       # a non-resumable reason
+    d.ledger.update(1, resumable=0)
+    d._block(1, "gate: tests red")
+    assert "from scratch" in cap.posts[-1] and "from scratch" in comments[-1]
+
+
+def test_turn_cap_reason_names_the_budget_too_when_both_apply(tmp_path):
+    d = _dispatcher(tmp_path, TASK_CAP_USD="15")
+    d.ledger.upsert_claim(1, "s", "s")
+    d.ledger.add_cost(1, 16.55)
+    res = SessionResult(is_error=True, num_turns=61, cost_usd=16.55)
+    stop = d._stop_reason(1, res, 1)
+    assert stop[0] == "block"
+    assert stop[1] == "cap: turns=60 and task cost $16.55 >= $15.00"
+    d.ledger.upsert_claim(1, "s", "s")                                    # fresh budget: only turns
+    assert d._stop_reason(1, res, 1)[1] == "cap: turns=60"
+
+
+def test_merge_cleanup_sends_the_merged_message_once(tmp_path, monkeypatch):
+    led = Ledger(tmp_path / "l.db")
+    _pr_open_row(led)
+    led.add_cost(7, 2.5)
+    cap = _Cap()
+    pr = {"number": 2, "state": "MERGED", "headRefName": "task-7-x", "url": "https://gh/pr/2",
+          "mergeCommit": {"oid": "abcdef1234567"}}
+    monkeypatch.setattr(cleanup, "open_worker_prs", lambda cfg: [pr])
+    monkeypatch.setattr(cleanup.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+    b = {"done": {"project_view_id": 1, "id": 1}, "blocked": {"project_view_id": 1, "id": 2}}
+    cleanup.process_closed_prs(_cfg(tmp_path), led, _NTStub(), _VKStub(), b, _slack(cap))
+    cleanup.process_closed_prs(_cfg(tmp_path), led, _NTStub(), _VKStub(), b, _slack(cap))   # next poll
+    assert len(cap.posts) == 1 and "Task 7 *merged*: https://gh/pr/2" in cap.posts[0]
+    assert "$2.50 this attempt" in cap.posts[0]
+
+
+def test_closed_unmerged_pr_does_not_claim_it_was_merged(tmp_path, monkeypatch):
+    led = Ledger(tmp_path / "l.db")
+    _pr_open_row(led)
+    cap = _Cap()
+    pr = {"number": 2, "state": "CLOSED", "headRefName": "task-7-x", "url": "https://gh/pr/2"}
+    monkeypatch.setattr(cleanup, "open_worker_prs", lambda cfg: [pr])
+    monkeypatch.setattr(cleanup.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+    b = {"done": {"project_view_id": 1, "id": 1}, "blocked": {"project_view_id": 1, "id": 2}}
+    cleanup.process_closed_prs(_cfg(tmp_path), led, _NTStub(), _VKStub(), b, _slack(cap))
+    assert cap.posts == []
