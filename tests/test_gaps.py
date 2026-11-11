@@ -37,6 +37,14 @@ mode = os.environ.get("FAKE_MODE", "ok")
 print(json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}), flush=True)
 if mode == "hang":
     time.sleep(60)
+if mode == "cumcost":
+    # like the real CLI: a resumed session reports the CUMULATIVE cost of the conversation
+    prev = float(open(os.environ["FAKE_CUM_FILE"]).read() or 0) if "--resume" in sys.argv else 0.0
+    cost = prev + 0.5
+    open(os.environ["FAKE_CUM_FILE"], "w").write(str(cost))
+    print(json.dumps({"type": "result", "subtype": "success", "total_cost_usd": cost,
+                      "num_turns": 2, "is_error": False, "result": "ok"}), flush=True)
+    sys.exit(0)
 if mode in ("turncap_once", "turncap_always"):
     n = int(open(os.environ["FAKE_CAP_COUNTER"]).read() or 0) + 1
     open(os.environ["FAKE_CAP_COUNTER"], "w").write(str(n))
@@ -1075,3 +1083,62 @@ def test_requeue_keeps_session_and_resumable_flag(tmp_path):
     led.upsert_claim(1, "s", "s")                                   # human drags the card back
     row = led.get(1)
     assert row["session_id"] == "sess" and row["resumable"] == 1 and row["test_retries"] == 0
+
+
+# =====================================================================================
+# Cost of resumed sessions is cumulative: account only the new spend
+# =====================================================================================
+def _res(cost, sid="s"):
+    return SessionResult(cost_usd=cost, session_id=sid)
+
+
+def test_resumed_session_cost_is_accounted_as_a_delta(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d._account_cost(1, _res(3.10))                       # fresh session
+    d._account_cost(1, _res(4.58), resumed=True)         # resumed: reports 4.58 cumulative
+    d._account_cost(1, _res(4.93), resumed=True)
+    row = d.ledger.get(1)
+    assert row["cost_usd"] == pytest.approx(4.93) and row["lifetime_cost"] == pytest.approx(4.93)
+    assert row["session_cum"] == pytest.approx(4.93)
+    assert d.ledger.today_cost() == pytest.approx(4.93)  # the daily cap sees the real spend too
+
+
+def test_fresh_session_resets_the_cumulative_baseline(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d._account_cost(1, _res(5.0))
+    d._account_cost(1, _res(0.4))                        # a NEW conversation (e.g. the reviewer)
+    assert d.ledger.get(1)["cost_usd"] == pytest.approx(5.4)
+    d._account_cost(1, _res(0.9), resumed=True)          # resumes that conversation: +0.5 only
+    assert d.ledger.get(1)["cost_usd"] == pytest.approx(5.9)
+
+
+def test_failed_launch_with_no_cost_does_not_lose_the_baseline(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d._account_cost(1, _res(3.0))
+    d._account_cost(1, _res(0.0), resumed=True)          # e.g. a transient failure before any spend
+    d._account_cost(1, _res(3.5), resumed=True)
+    assert d.ledger.get(1)["cost_usd"] == pytest.approx(3.5)
+
+
+def test_counter_restart_is_not_treated_as_negative_spend(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d._account_cost(1, _res(3.0))
+    d._account_cost(1, _res(1.0), resumed=True)          # CLI reported less than before: restarted
+    assert d.ledger.get(1)["cost_usd"] == pytest.approx(4.0)
+
+
+def test_launch_end_to_end_with_a_cumulative_cost_reporting_cli(tmp_path, fake_bin, monkeypatch):
+    cum = tmp_path / "cum"
+    monkeypatch.setenv("FAKE_CUM_FILE", str(cum))
+    monkeypatch.setenv("FAKE_MODE", "cumcost")
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d._launch(1, tmp_path, "s", "p", "session.jsonl")                                  # 0.5
+    d._launch(1, tmp_path, "s", "p", "session.jsonl", resume_session="s1")            # reports 1.0
+    d._launch(1, tmp_path, "s", "p", "session.jsonl", resume_session="s1")            # reports 1.5
+    assert d.ledger.get(1)["cost_usd"] == pytest.approx(1.5)                            # not 3.0
+    assert d.ledger.today_cost() == pytest.approx(1.5)
