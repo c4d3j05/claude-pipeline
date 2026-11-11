@@ -1657,3 +1657,158 @@ def test_closed_unmerged_pr_does_not_claim_it_was_merged(tmp_path, monkeypatch):
     b = {"done": {"project_view_id": 1, "id": 1}, "blocked": {"project_view_id": 1, "id": 2}}
     cleanup.process_closed_prs(_cfg(tmp_path), led, _NTStub(), _VKStub(), b, _slack(cap))
     assert cap.posts == []
+
+
+# =====================================================================================
+# Infrastructure failures are not the worker's fault
+# =====================================================================================
+import socket
+
+
+def _free_port():
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+    return port                                           # nothing listens here
+
+
+def _pg_tail(port):
+    # the shape of the error that stopped task 819 (django-tenants / psycopg)
+    return ("E   django.db.utils.OperationalError: connection to server at \"localhost\" (::1), "
+            f"port {port} failed: Connection refused\nE   \tIs the server running on that host and "
+            "accepting TCP/IP connections?\nE   connection to server at \"localhost\" (127.0.0.1), "
+            f"port {port} failed: Connection refused")
+
+
+def test_detect_recognises_connection_failures_but_not_ordinary_test_failures():
+    from dispatcher import infra
+
+    f = infra.detect(_pg_tail(5432))
+    assert (f.service, f.host, f.port) == ("database", "localhost", 5432)
+    assert f.summary == "cannot reach the database at localhost:5432"
+    assert infra.detect("Cannot connect to the Docker daemon at unix:///var/run/docker.sock").service == "Docker"
+    # an ordinary failure, even one whose text mentions the words, is the worker's job
+    assert infra.detect("FAILED tests/test_api.py::test_x - AssertionError: assert 'connection refused' in msg") is None
+    assert infra.detect("E   assert 3 == 4\nFAILED tests/test_math.py::test_add") is None
+    assert infra.detect("") is None
+
+
+def test_reachable_probes_the_endpoint():
+    from dispatcher import infra
+
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    try:
+        up = infra.InfraFailure("database", "127.0.0.1", srv.getsockname()[1])
+        assert up.reachable() is True
+    finally:
+        srv.close()
+    assert infra.InfraFailure("database", "127.0.0.1", _free_port()).reachable() is False
+    assert infra.InfraFailure("Docker").reachable() is None            # nothing to probe
+
+
+def _verify_setup(tmp_path, monkeypatch, gate_results):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    results = iter(gate_results)
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: next(results))
+    monkeypatch.setattr(dmod, "working_tree_dirty", lambda wt: False)
+    resumed, comments = [], []
+    monkeypatch.setattr(d, "_resume_step", lambda *a, **k: resumed.append(1))
+    d.comment = lambda tid, text: comments.append(text)
+    return d, resumed, comments
+
+
+def test_service_down_blocks_as_environment_without_spending_a_worker_retry(tmp_path, monkeypatch):
+    d, resumed, _ = _verify_setup(tmp_path, monkeypatch, [(False, _pg_tail(_free_port()))])
+    stop = d._verify(1, tmp_path, "s", dmod._Run(SessionResult(), "sid"))
+    assert stop[0] == "block" and stop[1].startswith("environment: cannot reach the database")
+    assert "Start it, then re-queue" in stop[1]
+    assert resumed == [] and d.ledger.get(1)["test_retries"] == 0     # no paid retry
+
+
+def test_service_that_came_back_gets_one_free_gate_rerun(tmp_path, monkeypatch):
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        tail = _pg_tail(port).replace("localhost", "127.0.0.1")
+        d, resumed, comments = _verify_setup(tmp_path, monkeypatch, [(False, tail), (True, "")])
+        assert d._verify(1, tmp_path, "s", dmod._Run(SessionResult(), "sid")) is None
+        assert resumed == [] and d.ledger.get(1)["test_retries"] == 0
+        assert any("re-running the gate without using a retry" in c for c in comments)
+        # ... but only one: if it fails the same way again, stop rather than loop
+        (tmp_path / "b").mkdir()
+        d2, resumed2, _ = _verify_setup(tmp_path / "b", monkeypatch, [(False, tail), (False, tail)])
+        stop = d2._verify(1, tmp_path, "s", dmod._Run(SessionResult(), "sid"))
+        assert stop[0] == "block" and stop[1].startswith("environment:") and resumed2 == []
+    finally:
+        srv.close()
+
+
+def test_a_real_test_failure_still_goes_back_to_the_worker(tmp_path, monkeypatch):
+    d, resumed, _ = _verify_setup(tmp_path, monkeypatch,
+                                  [(False, "FAILED tests/test_x.py::test_y - assert 1 == 2"), (True, "")])
+    assert d._verify(1, tmp_path, "s", dmod._Run(SessionResult(), "sid")) is None
+    assert resumed == [1] and d.ledger.get(1)["test_retries"] == 1
+
+
+def test_environment_block_is_marked_for_a_gates_only_resume(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d.move = lambda *a: None; d.comment = lambda *a: None
+    d._block(1, "environment: cannot reach the database at localhost:5432. Start it, then re-queue")
+    assert d.ledger.get(1)["resumable"] == 2
+    d.ledger.update(1, resumable=0)
+    d._block(1, "cap: turns=60")
+    assert d.ledger.get(1)["resumable"] == 1                           # a cap resumes the WORKER
+
+
+def test_gates_only_resume_skips_the_worker_and_runs_the_gates(pipeline, repo, monkeypatch):
+    d, ev = pipeline
+    _arm_resume(d, repo, monkeypatch)
+    d.ledger.update(1, resumable=2)                                    # blocked by the environment
+    monkeypatch.setattr(d, "_launch", lambda *a, **k: pytest.fail("a worker was launched"))
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert d.ledger.get(1)["state"] == "pr_open" and d.ledger.get(1)["resumable"] == 0
+    assert any("re-running the test gates" in c for c in ev["comments"])
+
+
+def test_baseline_never_caches_an_infrastructure_failure(tmp_path, monkeypatch):
+    d = _dispatcher(tmp_path)
+    monkeypatch.setattr(d.ntree, "rev", lambda ref: "a" * 40)
+    results = iter([(False, _pg_tail(5432)), (True, "")])
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: next(results))
+    stop = d._baseline(1, tmp_path, "s", "main")
+    assert stop[0] == "block" and stop[1].startswith("environment:")
+    assert d.ledger.get_baseline("a" * 40) is None                    # nothing remembered
+    assert d._baseline(1, tmp_path, "s", "main") is None              # next time it really runs
+    assert d.ledger.get_baseline("a" * 40) is not None
+
+
+def test_baseline_cache_is_only_trusted_within_the_same_boot(tmp_path):
+    led = Ledger(tmp_path / "l.db")
+    led.set_baseline("sha1", True, "", boot_id="boot-A")
+    assert led.get_baseline("sha1", "boot-A") is not None
+    assert led.get_baseline("sha1", "boot-B") is None                 # rebooted: re-check
+    assert led.get_baseline("sha1") is not None                       # no boot given: age only
+    led.conn.execute("INSERT INTO baseline (sha, green, tail, checked_at) VALUES ('old', 1, '', ?)",
+                     (__import__("datetime").datetime.now().isoformat(timespec="seconds"),))
+    led.conn.commit()
+    assert led.get_baseline("old", "boot-A") is None                  # pre-upgrade rows are re-checked
+
+
+def test_baseline_table_gains_its_boot_column_on_an_old_database(tmp_path):
+    import sqlite3
+
+    p = tmp_path / "old.db"
+    c = sqlite3.connect(p)
+    c.execute("CREATE TABLE baseline (sha TEXT PRIMARY KEY, green INTEGER NOT NULL, "
+              "tail TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL)")
+    c.commit(); c.close()
+    led = Ledger(p)
+    led.set_baseline("x", True, "", boot_id="b")
+    assert led.get_baseline("x", "b") is not None
+
+
+def test_environment_blocks_tell_the_human_to_start_the_service():
+    from dispatcher.notify import next_step
+
+    text = next_step("environment: cannot reach the database at localhost:5432", True)
+    assert "a service the tests need is down" in text and "only the test gates are re-run" in text

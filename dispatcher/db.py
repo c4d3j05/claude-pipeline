@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS baseline (
     sha        TEXT PRIMARY KEY,           -- base commit the gate was run against
     green      INTEGER NOT NULL,
     tail       TEXT NOT NULL DEFAULT '',
-    checked_at TEXT NOT NULL
+    checked_at TEXT NOT NULL,
+    boot_id    TEXT                        -- machine boot the result is valid for
 );
 
 CREATE TABLE IF NOT EXISTS control (
@@ -74,6 +75,9 @@ class Ledger:
 
     def _migrate(self) -> None:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)")}
+        bcols = {r[1] for r in self.conn.execute("PRAGMA table_info(baseline)")}
+        if bcols and "boot_id" not in bcols:
+            self.conn.execute("ALTER TABLE baseline ADD COLUMN boot_id TEXT")
         if "session_cum" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN session_cum REAL NOT NULL DEFAULT 0")
         if "resumable" not in cols:
@@ -226,20 +230,30 @@ class Ledger:
             ).fetchall()
 
     # --- baseline (gate result per base commit) -----------------------------------------
-    def get_baseline(self, sha: str, max_age_h: float = 6.0) -> sqlite3.Row | None:
+    def get_baseline(self, sha: str, boot_id: str | None = None,
+                     max_age_h: float = 6.0) -> sqlite3.Row | None:
+        """A cached gate result for this base commit, if it is recent AND from this boot.
+
+        A reboot can break the environment (a container that does not restart) without any
+        code change, so a result recorded before the last boot is not trusted. Results from
+        before this column existed have no boot id and are treated the same way.
+        """
         cutoff = (dt.datetime.now() - dt.timedelta(hours=max_age_h)).isoformat(timespec="seconds")
         with self._lock:
-            return self.conn.execute(
+            row = self.conn.execute(
                 "SELECT * FROM baseline WHERE sha=? AND checked_at >= ?", (sha, cutoff)
             ).fetchone()
+        if row is not None and boot_id and (row["boot_id"] or "") != boot_id:
+            return None
+        return row
 
-    def set_baseline(self, sha: str, green: bool, tail: str = "") -> None:
+    def set_baseline(self, sha: str, green: bool, tail: str = "", boot_id: str = "") -> None:
         with self._lock:
             self.conn.execute(
-                """INSERT INTO baseline (sha, green, tail, checked_at) VALUES (?, ?, ?, ?)
+                """INSERT INTO baseline (sha, green, tail, checked_at, boot_id) VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(sha) DO UPDATE SET green=excluded.green, tail=excluded.tail,
-                       checked_at=excluded.checked_at""",
-                (sha, 1 if green else 0, tail[-2000:], _now()),
+                       checked_at=excluded.checked_at, boot_id=excluded.boot_id""",
+                (sha, 1 if green else 0, tail[-2000:], _now(), boot_id or None),
             )
             self.conn.commit()
 
