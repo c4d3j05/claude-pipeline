@@ -46,6 +46,12 @@ def cmd_run(args) -> int:
 
 def cmd_dashboard(args) -> int:
     cfg = _load(args.env)
+    if args.once and args.task:
+        from .db import Ledger
+        from .detail import format_detail, task_detail
+
+        print(format_detail(task_detail(cfg, Ledger(cfg.db_path), args.task)))
+        return 0
     if args.once:
         from .dashboard import snapshot_text
         from .db import Ledger
@@ -188,6 +194,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("sync", help="forget tasks whose Vikunja ticket was deleted").set_defaults(func=cmd_sync)
     dash = sub.add_parser("dashboard", help="terminal control panel (status + config + controls)")
     dash.add_argument("--once", action="store_true", help="print a one-shot text status and exit (no TUI)")
+    dash.add_argument("--task", type=int, default=0,
+                      help="with --once: show the live detail of one task (phase, turns, cost, ...)")
     dash.add_argument("--state", default="all", choices=["all", "active", "blocked", "pr_open", "done"],
                       help="with --once: only show tasks in this state group")
     dash.set_defaults(func=cmd_dashboard)

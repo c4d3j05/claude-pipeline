@@ -1331,3 +1331,210 @@ def test_tui_f_key_cycles_the_filter_and_selection_follows_the_visible_rows(tmp_
     assert seen["active"] == [3, 6, 7, 8] and seen["blocked"] == [1, 4]
     assert seen["pr_open"] == [5] and seen["done"] == [2]
     assert seen["selected_in_blocked"] == 4
+
+
+# =====================================================================================
+# Per-task detail view
+# =====================================================================================
+def _ev_assistant(mid, tool=None, target="", text="", model="m-opus", usage=None):
+    block = ({"type": "tool_use", "name": tool, "input": {"file_path": target}} if tool
+             else {"type": "text", "text": text})
+    return {"type": "assistant", "message": {"id": mid, "model": model, "content": [block],
+                                             "usage": usage or {"input_tokens": 10, "output_tokens": 100,
+                                                                "cache_creation_input_tokens": 1000,
+                                                                "cache_read_input_tokens": 50000}}}
+
+
+def _ev_result(cost, turns=5, sub="success", model="m-opus"):
+    return {"type": "result", "subtype": sub, "total_cost_usd": cost, "num_turns": turns,
+            "modelUsage": {model: {"inputTokens": 100, "outputTokens": 1000, "cacheCreationInputTokens": 5000,
+                                   "cacheReadInputTokens": 500000, "costUSD": cost}}}
+
+
+def _write_log(path, events):
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+
+def test_sessions_split_at_each_result_and_expose_the_one_in_progress():
+    from dispatcher import detail
+
+    evs = [_ev_assistant("a"), _ev_result(1.0), _ev_assistant("b"), _ev_result(1.5), _ev_assistant("c")]
+    groups = detail.sessions(evs)
+    assert [len(g) for g in groups] == [2, 2, 1]
+    assert detail.sessions(evs[:4])[-1][-1]["type"] == "result"       # nothing in progress
+    assert detail.sessions([]) == []
+
+
+def test_session_summary_counts_turns_once_per_message_and_lists_latest_actions():
+    from dispatcher import detail
+
+    evs = [_ev_assistant("m1", "Read", "/w/a.py"), _ev_assistant("m1", "Edit", "/w/a.py"),   # same message
+           _ev_assistant("m2", "Bash", "pytest -q"), _ev_assistant("m3", text="all done")]
+    s = detail.summarize_session(evs)
+    assert s["turns"] == 3 and s["tools"] == {"Read": 1, "Edit": 1, "Bash": 1}
+    assert s["actions"][-1].startswith("Bash:") and "pytest" in s["actions"][-1]
+    assert s["last_text"] == "all done"
+
+
+def test_past_sessions_report_new_spend_not_the_running_total():
+    from dispatcher import detail
+
+    past = detail.past_sessions([_ev_result(3.10, 61, "error_max_turns"), _ev_result(4.58, 11), _ev_result(4.93, 4)])
+    assert [round(p["new_cost"], 2) for p in past] == [3.10, 1.48, 0.35]
+    assert past[0]["outcome"] == "error_max_turns"
+
+
+def test_live_cost_estimate_is_calibrated_per_model_and_not_inflated_by_repeated_usage():
+    from dispatcher import detail
+
+    done = [_ev_result(2.0, model="m-opus"), _ev_result(0.2, model="m-sonnet")]
+    opus = detail.calibrate_input_price(done, "m-opus")
+    sonnet = detail.calibrate_input_price(done, "m-sonnet")
+    assert opus > sonnet * 5                                    # priced separately, not mixed
+    once = [_ev_assistant("m1", "Read", "/a")]
+    repeated = [_ev_assistant("m1", "Read", "/a"), _ev_assistant("m1", text="same message, 2nd block")]
+    assert detail.estimate_cost(repeated, opus) == pytest.approx(detail.estimate_cost(once, opus))
+    assert detail.calibrate_input_price([], "m-opus") is None
+
+
+def _ps(*rows):
+    return [{"pid": p, "ppid": pp, "age": age, "args": a} for p, pp, age, a in rows]
+
+
+SLUG = "task-9-x"
+CLAUDE = "/home/u/.local/bin/claude -p --output-format stream-json --verbose --max-turns 60"
+REVIEW = CLAUDE + " --permission-mode plan"
+GATE = f"bash /usr/local/bin/ntree run {SLUG} -- scripts/worker-test.sh"
+
+
+def test_process_detection_tells_a_hook_gate_from_a_dispatcher_gate():
+    from dispatcher import detail
+
+    in_cwd = lambda pid: f"/w/.ntree/{SLUG}" if pid in (10, 20) else ""
+    hook = _ps((1, 0, 9000, "python claude-pipeline run"), (10, 1, 700, CLAUDE),
+               (11, 10, 500, "sh -c bash -c 'set -o pipefail; ntree run \"$NTREE_WORKSPACE\" ..."),
+               (12, 11, 500, "bash -c set -o pipefail; ntree run ..."), (13, 12, 500, GATE))
+    p = detail.find_processes(hook, SLUG, in_cwd)
+    assert p["worker"]["pid"] == 10 and p["gate"] == {"age": 500, "kind": "stop-hook"}
+    disp = _ps((1, 0, 9000, "python /x/claude-pipeline/.venv/bin/python claude-pipeline run"), (13, 1, 300, GATE))
+    p = detail.find_processes(disp, SLUG, in_cwd)
+    assert p["gate"] == {"age": 300, "kind": "dispatcher"} and p["worker"] is None
+    rev = _ps((1, 0, 9000, "python claude-pipeline run"), (20, 1, 40, REVIEW))
+    assert detail.find_processes(rev, SLUG, in_cwd)["reviewer"]["pid"] == 20
+    other = _ps((10, 1, 700, CLAUDE))
+    assert detail.find_processes(other, SLUG, lambda pid: "/w/.ntree/some-other-task")["worker"] is None
+
+
+@pytest.mark.parametrize("state,procs,expect", [
+    ("claimed", {}, "creating the workspace"),
+    ("working", {}, "setup or baseline gate"),
+    ("working", {"worker": {"age": 125}}, "worker session running (2m05s"),
+    ("working", {"gate": {"age": 61, "kind": "stop-hook"}}, "Stop-hook test gate is running (1m01s"),
+    ("testing", {"gate": {"age": 30, "kind": "dispatcher"}}, "dispatcher test gate running"),
+    ("testing", {}, "queued behind another gate"),
+    ("reviewing", {"reviewer": {"age": 20}}, "review (read-only reviewer), running 0m20s"),
+    ("pr_open", {}, "waiting for a human"),
+    ("done", {}, "merged"),
+])
+def test_phase_is_derived_from_state_and_processes(state, procs, expect):
+    from dispatcher import detail
+
+    assert expect in detail.derive_phase(state, {"worker": None, "reviewer": None, "gate": None, **procs})
+
+
+def test_blocked_phase_says_how_to_resume():
+    from dispatcher import detail
+
+    none = {"worker": None, "reviewer": None, "gate": None}
+    assert "drag the card back to Ready" in detail.derive_phase("blocked", none, resumable=True)
+    assert "needs a decision" in detail.derive_phase("blocked", none, resumable=False)
+
+
+def test_task_detail_end_to_end_with_a_session_still_held_open(tmp_path, repo):
+    from dispatcher import detail
+
+    cfg = _cfg(tmp_path, repo)
+    led = Ledger(tmp_path / "p.db")
+    led.upsert_claim(9, SLUG, SLUG)
+    led.update(9, state="working", test_retries=0)
+    led.add_cost(9, 2.0)                                   # recorded so far: one finished session
+    logs = tmp_path / "logs"
+    _write_log(logs / SLUG / "session.jsonl", [
+        _ev_assistant("a", "Read", "/w/x.py"), _ev_result(2.0, 61, "error_max_turns"),
+        _ev_assistant("b", "Edit", "/w/y.py"), _ev_assistant("c", text="finished"),
+        _ev_result(5.0, 12),                                # ended, but not recorded in the ledger yet
+        _ev_assistant("d", "Bash", "pytest -q"),             # a new pass in progress
+    ])
+    _change(repo)
+    ws = repo / ".ntree" / SLUG
+    ws.parent.mkdir(parents=True, exist_ok=True)
+    ws.symlink_to(repo)                                    # the workspace is a git checkout
+    table = _ps((1, 0, 900, "python claude-pipeline run"), (10, 1, 700, CLAUDE),
+                (11, 10, 120, "sh -c ..."), (12, 11, 120, GATE))
+    d = detail.task_detail(cfg, led, 9, logs, table=table, cwd_of=lambda pid: str(ws) if pid == 10 else "")
+    assert d["phase"].startswith("worker finished its turns; its own Stop-hook test gate")
+    assert d["unrecorded"] == pytest.approx(3.0) and d["accounted_cost"] == pytest.approx(2.0)
+    assert d["session"]["turns"] == 1 and d["session"]["actions"][-1].startswith("Bash:")
+    assert [p["outcome"] for p in d["past"]] == ["error_max_turns", "success"]
+    assert len(d["workspace"]["commits"]) == 1
+    text = detail.format_detail(d)
+    for needle in ("Task #9", "WORKING", "Stop-hook test gate", "turn 1 of 60", "pytest -q",
+                   "Spent      at least ~$5.", "Earlier sessions", "1 commit(s)"):
+        assert needle in text, needle
+    assert detail.format_detail(None) == "(no such task in the ledger)"
+    assert detail.task_detail(cfg, led, 12345) is None
+
+
+def test_finished_task_detail_has_no_live_section(tmp_path, repo):
+    from dispatcher import detail
+
+    led = Ledger(tmp_path / "p.db")
+    led.upsert_claim(9, SLUG, SLUG); led.update(9, state="done", pr_url="https://gh/pr/7")
+    d = detail.task_detail(_cfg(tmp_path, repo), led, 9, tmp_path / "logs", table=[])
+    text = detail.format_detail(d)
+    assert "DONE" in text and "https://gh/pr/7" in text and "merged and cleaned up" in text
+    assert "Live cost" not in text and "Latest actions" not in text
+
+
+def test_cli_task_flag_prints_the_detail(tmp_path, capsys, monkeypatch):
+    from dispatcher import __main__ as cli
+
+    led = Ledger(tmp_path / "p.db")
+    led.upsert_claim(9, SLUG, SLUG); led.update(9, state="blocked", resumable=1)
+    led.conn.close()
+    assert cli.main(["--env", str(_cfg_env(tmp_path)), "dashboard", "--once", "--task", "9"]) == 0
+    assert "drag the card back to Ready" in capsys.readouterr().out
+
+
+def _cfg_env(tmp_path):
+    _cfg(tmp_path)
+    return tmp_path / ".env"
+
+
+def test_tui_enter_opens_the_detail_screen_and_escape_closes_it(tmp_path):
+    import asyncio
+
+    pytest.importorskip("textual")
+    from textual.widgets import Static
+
+    from dispatcher.tui import DashboardApp, DetailScreen
+
+    led = _mixed(tmp_path, db="p.db")
+    led.conn.close()
+
+    async def run():
+        app = DashboardApp(_cfg(tmp_path), str(tmp_path / ".env"))
+        async with app.run_test(size=(120, 30)) as pilot:
+            await pilot.pause(0.3)
+            await pilot.press("down", "down", "enter")             # third row = task 3
+            await pilot.pause(0.4)
+            opened = isinstance(app.screen, DetailScreen)
+            body = str(app.screen.query_one("#detail-body", Static).render()) if opened else ""
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+            return opened, body, isinstance(app.screen, DetailScreen)
+    opened, body, still_open = asyncio.run(run())
+    assert opened and "Task #3" in body and "WORKING" in body and not still_open

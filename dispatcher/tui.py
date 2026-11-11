@@ -13,6 +13,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 
 from . import dashboard as dash
+from . import detail as detailmod
 from .config import Config
 from .db import Ledger
 
@@ -30,6 +31,34 @@ _CONFIG_FIELDS = [
     ("REVIEW_MODEL", "Review model"),
     ("PERMISSION_MODE", "Permission mode"),
 ]
+
+
+class DetailScreen(ModalScreen):
+    """Live detail for one task: phase, turns, latest actions, estimated cost, workspace."""
+
+    BINDINGS: ClassVar = [
+        Binding("escape", "close", "Back"),
+        Binding("q", "close", "Back"),
+    ]
+
+    def __init__(self, cfg: Config, ledger: Ledger, task_id: int, logs_root: Path):
+        super().__init__()
+        self._cfg, self._ledger, self._task_id, self._logs = cfg, ledger, task_id, logs_root
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="detail-body", markup=False)
+        yield Label("[esc] back   (refreshes every 2s)", id="detail-hint")
+
+    def on_mount(self) -> None:
+        self.refresh_detail()
+        self.set_interval(2.0, self.refresh_detail)
+
+    def refresh_detail(self) -> None:
+        d = detailmod.task_detail(self._cfg, self._ledger, self._task_id, self._logs)
+        self.query_one("#detail-body", Static).update(detailmod.format_detail(d))
+
+    def action_close(self) -> None:
+        self.dismiss(None)
 
 
 class ConfigScreen(ModalScreen):
@@ -123,7 +152,7 @@ class DashboardApp(App):
         self.query_one("#summary", Static).update(
             f"[b]claude-pipeline[/]   workers [b]{st['active']}/{st['max_workers']}[/]   "
             f"spend [{cap_color}]${st['today_cost']:.2f}[/]/${st['cap']:.0f} today   {pause}{flt}\n"
-            f"[dim]f filter · p pause · r retry · c cancel · o open PR · s sync deleted · e config · q quit[/]"
+            f"[dim]enter details · f filter · p pause · r retry · c cancel · o open PR · s sync deleted · e config · q quit[/]"
         )
 
         table = self.query_one("#tasks", DataTable)
@@ -195,6 +224,12 @@ class DashboardApp(App):
         except Exception as e:  # noqa: BLE001
             self.notify(f"Retry failed: {e}", severity="error")
         self.refresh_data()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Enter on a row opens that task's live detail."""
+        idx = event.cursor_row
+        if idx is not None and 0 <= idx < len(self._row_ids):
+            self.push_screen(DetailScreen(self.cfg, self.ledger, self._row_ids[idx], self.logs_root))
 
     def action_filter(self) -> None:
         """Cycle: all -> active -> blocked -> pr_open -> done -> all."""
