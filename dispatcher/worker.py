@@ -82,7 +82,7 @@ def launch(
         def _expire() -> None:
             log.warning("wall-clock limit hit; killing worker %s", worktree.name)
             timed_out.set()
-            kill_group(proc.pid)
+            kill_group(proc.pid, proc=proc)
 
         timer = threading.Timer(wall_clock_limit_min * 60, _expire)
         timer.daemon = True
@@ -114,16 +114,30 @@ def launch(
     return result, (124 if timed_out.is_set() else rc)
 
 
-def kill_group(pid: int, grace: float = 2.0) -> None:
-    """SIGTERM a process group, then SIGKILL whatever is left."""
+def kill_group(pid: int, grace: float = 15.0, proc: subprocess.Popen | None = None) -> None:
+    """Stop a process group gracefully: SIGTERM, wait up to `grace`s, SIGKILL stragglers.
+
+    The wait matters: git removes its lock files when it receives SIGTERM, but a SIGKILL
+    leaves .git/config.lock (and friends) behind, which then breaks every later
+    `git worktree add` / `git config` in the repo. Pass `proc` when the leader is our own
+    child so it is reaped (a zombie leader would keep the group looking alive).
+    """
     try:
         pgid = os.getpgid(pid)
+        os.killpg(pgid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if proc is not None:
+            proc.poll()
         try:
-            os.killpg(pgid, sig)
+            os.killpg(pgid, 0)
         except (ProcessLookupError, PermissionError):
-            return
-        if sig == signal.SIGTERM:
-            time.sleep(grace)
+            return  # whole group exited on SIGTERM — nothing left to leave a lock behind
+        time.sleep(0.1)
+    log.warning("process group %s ignored SIGTERM for %.0fs; sending SIGKILL", pgid, grace)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass

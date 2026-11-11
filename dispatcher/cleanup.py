@@ -120,6 +120,9 @@ def prune_stale(cfg: Config, ledger: Ledger, ntree: Ntree) -> list[str]:
 def nightly(cfg: Config, ntree: Ntree, slack: Slack, ledger: Ledger | None = None) -> str:
     """ntree doctor + prune + report. Returns a human summary (also sent to Slack by caller)."""
     lines: list[str] = []
+    swept = ntree.clear_stale_git_locks()
+    if swept:
+        lines.append(f"removed {len(swept)} stale git lock(s)")
     if ledger is not None:
         pruned = prune_stale(cfg, ledger, ntree)
         lines.append(f"pruned {len(pruned)} stale blocked workspace(s)"

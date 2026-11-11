@@ -355,3 +355,150 @@ def test_cost_cap_stops_before_review(pipeline):
     d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
     assert d.ledger.get(1)["state"] == "blocked" and ev["prs"] == []
     assert any("task cost" in c for c in ev["comments"])
+
+
+# --- worker credentials file --------------------------------------------------------------
+def test_worker_env_file_is_parsed_and_reread_each_time(tmp_path, monkeypatch):
+    from dispatcher import procenv
+
+    f = tmp_path / "worker.env"
+    f.write_text("# creds\nexport CLAUDE_CODE_OAUTH_TOKEN=tok1\nGH_TOKEN='gh1'\nBAD LINE\nQ=\"a b\"\n")
+    monkeypatch.setenv("WORKER_ENV_FILE", str(f))
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_TOKEN", "leak")
+    e = procenv.clean_env()
+    assert (e["CLAUDE_CODE_OAUTH_TOKEN"], e["GH_TOKEN"], e["Q"]) == ("tok1", "gh1", "a b")
+    assert "CLAUDECODE" not in e and "CLAUDE_CODE_MESSAGING_TOKEN" not in e
+    f.write_text("export CLAUDE_CODE_OAUTH_TOKEN=tok2\n")  # rotated between tasks
+    assert procenv.clean_env()["CLAUDE_CODE_OAUTH_TOKEN"] == "tok2"
+
+
+def test_missing_worker_env_file_is_fine(tmp_path, monkeypatch):
+    from dispatcher import procenv
+
+    monkeypatch.setenv("WORKER_ENV_FILE", str(tmp_path / "nope"))
+    assert isinstance(procenv.clean_env(), dict)
+
+
+# --- git config lock / tracking -------------------------------------------------------------
+def test_ntree_runs_with_autosetupmerge_disabled(tmp_path, monkeypatch):
+    b = tmp_path / "bin"; b.mkdir()
+    _script(b / "ntree", '#!/bin/sh\necho "$GIT_CONFIG_COUNT $GIT_CONFIG_KEY_0=$GIT_CONFIG_VALUE_0"\n')
+    monkeypatch.setenv("PATH", f"{b}:{__import__('os').environ['PATH']}")
+    cp = Ntree(tmp_path)._run(["x"])
+    assert cp.stdout.strip() == "1 branch.autoSetupMerge=false"
+
+
+def test_with_git_config_preserves_existing_entries():
+    from dispatcher.procenv import with_git_config
+
+    env = with_git_config({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "a.b",
+                           "GIT_CONFIG_VALUE_0": "1"}, branch__autoSetupMerge="false")
+    assert env["GIT_CONFIG_COUNT"] == "2" and env["GIT_CONFIG_KEY_0"] == "a.b"
+    assert env["GIT_CONFIG_KEY_1"] == "branch.autoSetupMerge"
+
+
+def test_stale_locks_are_swept_but_fresh_ones_are_not(tmp_path):
+    import os
+
+    r = tmp_path / "r"; r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    g = r / ".git"
+    (g / "worktrees" / "w").mkdir(parents=True)
+    locks = [g / "config.lock", g / "worktrees" / "w" / "index.lock"]
+    for lk in locks:
+        lk.write_text("")
+    nt = Ntree(r)
+    assert nt.clear_stale_git_locks() == [] and all(lk.exists() for lk in locks)   # fresh
+    old = time.time() - 600
+    for lk in locks:
+        os.utime(lk, (old, old))
+    assert sorted(nt.clear_stale_git_locks()) == sorted(locks)
+    assert not any(lk.exists() for lk in locks)
+
+
+def test_lock_held_by_a_live_process_is_never_removed(tmp_path):
+    import os
+
+    r = tmp_path / "r"; r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    lock = r / ".git" / "config.lock"
+    holder = subprocess.Popen(["sh", "-c", f"exec 9>{lock}; sleep 30"])
+    try:
+        time.sleep(0.3)
+        old = time.time() - 600
+        os.utime(lock, (old, old))
+        assert Ntree(r).clear_stale_git_locks() == [] and lock.exists()
+    finally:
+        holder.kill(); holder.wait()
+
+
+def test_new_waits_and_retries_when_a_lock_blocks_it(tmp_path, monkeypatch):
+    import os
+
+    from dispatcher import ntree as ntmod
+
+    r = tmp_path / "r"; r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    lock = r / ".git" / "config.lock"
+    lock.write_text("")
+    old = time.time() - 600
+    os.utime(lock, (old, old))
+    b = tmp_path / "bin"; b.mkdir()
+    _script(b / "ntree", f"""#!/bin/sh
+case "$1" in
+  new) if [ -e "{lock}" ]; then echo "error: could not lock config file .git/config: File exists" >&2; exit 255; fi ;;
+  path) echo "{tmp_path}/ws" ;;
+esac
+exit 0
+""")
+    monkeypatch.setenv("PATH", f"{b}:{os.environ['PATH']}")
+    monkeypatch.setattr(ntmod, "LOCK_RETRY_SLEEP", 0.01)
+    assert Ntree(r).new("task-1-x") == Path(f"{tmp_path}/ws")
+    assert not lock.exists()
+
+
+def test_new_gives_up_after_bounded_retries_on_a_live_lock(tmp_path, monkeypatch):
+    import os
+
+    from dispatcher import ntree as ntmod
+
+    b = tmp_path / "bin"; b.mkdir()
+    _script(b / "ntree", '#!/bin/sh\necho "error: could not lock config file .git/config" >&2\nexit 255\n')
+    monkeypatch.setenv("PATH", f"{b}:{os.environ['PATH']}")
+    monkeypatch.setattr(ntmod, "LOCK_RETRY_SLEEP", 0.01)
+    r = tmp_path / "r"; r.mkdir(); _git(r, "init", "-q", "-b", "main")
+    with pytest.raises(NtreeError, match="could not lock"):
+        Ntree(r).new("task-1-x")
+
+
+def test_kill_group_gives_sigterm_handlers_time_to_clean_up(tmp_path):
+    """git removes its locks on SIGTERM; a SIGKILL after 2s (the old grace) would not let it."""
+    lock = tmp_path / "x.lock"
+    child = subprocess.Popen(
+        ["python3", "-c", (
+            "import signal,sys,time,pathlib\n"
+            f"p=pathlib.Path({str(lock)!r}); p.write_text('')\n"
+            "def bye(*a):\n    time.sleep(3.5); p.unlink(); sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM, bye); print('ready',flush=True); time.sleep(60)")],
+        stdout=subprocess.PIPE, text=True, start_new_session=True)
+    child.stdout.readline()
+    from dispatcher.worker import kill_group
+
+    kill_group(child.pid, grace=15, proc=child)
+    assert not lock.exists()           # cleaned up by its own handler, not SIGKILLed
+    assert child.returncode == 0
+
+
+def test_kill_group_still_sigkills_a_process_that_ignores_sigterm(tmp_path):
+    child = subprocess.Popen(
+        ["python3", "-c", (
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready',flush=True); time.sleep(60)")],
+        stdout=subprocess.PIPE, text=True, start_new_session=True)
+    child.stdout.readline()
+    from dispatcher.worker import kill_group
+
+    t0 = time.monotonic()
+    kill_group(child.pid, grace=1, proc=child)
+    assert child.wait(timeout=5) != 0 and time.monotonic() - t0 < 10

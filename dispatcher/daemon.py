@@ -101,6 +101,7 @@ class Dispatcher:
     def run(self) -> None:
         self._lock_fh = _acquire_instance_lock(self.cfg.db_path.with_suffix(".lock"))
         self.refresh_board()
+        self.ntree.clear_stale_git_locks()   # leftovers from a previous crash/kill
         self.reap_orphans()
         log.info(
             "dispatcher up: project=%s view=%s max_workers=%s repo=%s",

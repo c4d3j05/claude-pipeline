@@ -8,12 +8,22 @@ swapped in later. Every method here is one contract operation.
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 from .log import get
-from .procenv import clean_env
+from .procenv import clean_env, with_git_config
 
 log = get("ntree")
+
+
+# Lock files (relative to the common git dir) that a killed git can leave behind.
+_LOCK_GLOBS = (
+    "config.lock", "packed-refs.lock", "shallow.lock", "HEAD.lock", "refs/**/*.lock",
+    "worktrees/*/index.lock", "worktrees/*/HEAD.lock",
+)
+LOCK_RETRIES = 4          # attempts for `ntree new` when git reports a lock error
+LOCK_RETRY_SLEEP = 15.0   # seconds between attempts (lets a fresh lock age past the sweep)
 
 
 class NtreeError(RuntimeError):
@@ -33,8 +43,46 @@ class Ntree:
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=clean_env(),
+            # Forking from a remote ref (origin/main) makes git write upstream-tracking
+            # config into the shared .git/config. We never want that (the PR push sets its
+            # own upstream) and it contends for config.lock with every other git process.
+            env=with_git_config(clean_env(), branch__autoSetupMerge="false"),
         )
+
+    def _git_common_dir(self) -> Path | None:
+        cp = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=self.repo,
+                            capture_output=True, text=True, timeout=30)
+        return (self.repo / cp.stdout.strip()) if cp.returncode == 0 else None
+
+    def clear_stale_git_locks(self, min_age_s: float = 30.0) -> list[Path]:
+        """Remove git lock files left behind by a killed git process.
+
+        A lock is removed only if it is older than `min_age_s` AND no process has it open,
+        so a live git (another worker, you in a terminal) is never disturbed.
+        """
+        common = self._git_common_dir()
+        if common is None:
+            return []
+        removed: list[Path] = []
+        for pattern in _LOCK_GLOBS:
+            for lock in common.glob(pattern):
+                try:
+                    age = time.time() - lock.stat().st_mtime
+                except OSError:
+                    continue
+                if age < min_age_s:
+                    continue
+                try:
+                    held = subprocess.run(["lsof", "-t", str(lock)], capture_output=True,
+                                          text=True, timeout=10).stdout.strip()
+                except (OSError, subprocess.SubprocessError):
+                    held = ""
+                if held:
+                    continue
+                lock.unlink(missing_ok=True)
+                log.warning("removed stale git lock %s (%.0fs old, no holder)", lock, age)
+                removed.append(lock)
+        return removed
 
     def base_ref(self) -> str:
         """The ref workspaces fork from and PRs are diffed against.
@@ -55,8 +103,18 @@ class Ntree:
 
     def new(self, slug: str, base_ref: str | None = None) -> Path:
         """Create the worktree + reserve ports + run NTREE_SETUP_CMD. Idempotent-ish."""
-        cp = self._run(["new", slug, "--from", base_ref or self.base], timeout=1200)
+        args = ["new", slug, "--from", base_ref or self.base]
+        cp = self._run(args, timeout=1200)
         out = (cp.stderr + cp.stdout)
+        for _ in range(LOCK_RETRIES - 1):
+            if cp.returncode == 0 or "could not lock" not in out:
+                break
+            # A git lock is in the way: sweep stale ones, else wait for a live holder.
+            if not self.clear_stale_git_locks():
+                time.sleep(LOCK_RETRY_SLEEP)
+            self.rm(slug)  # drop the half-made worktree before retrying
+            cp = self._run(args, timeout=1200)
+            out = (cp.stderr + cp.stdout)
         if cp.returncode != 0 and "already" not in out.lower():
             raise NtreeError(f"ntree new {slug} failed: {cp.stderr.strip() or cp.stdout.strip()}")
         # ntree exits 0 when NTREE_SETUP_CMD fails (it only warns). A workspace with
