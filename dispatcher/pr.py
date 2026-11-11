@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -48,6 +50,10 @@ def build_body(
     else:
         notes = "_No blocking findings._"
 
+    warn = ""
+    if review.get("truncated"):
+        warn = "\n> ⚠️ The diff exceeded the reviewer's size limit; part of it was **not** reviewed.\n"
+
     return f"""## Vikunja task
 [{task_title}]({vikunja_link}) · task-{task_id}
 
@@ -59,12 +65,31 @@ def build_body(
 
 ## Review notes
 Verdict: **{review.get('verdict', 'n/a')}**
-
+{warn}
 {notes}
 
 ---
 _Session `{session_id}` · cost ${cost_usd:.2f} · opened by claude-pipeline._
 """
+
+
+_PIPELINE_BRANCH_RE = re.compile(r"^task-\d+-")
+
+
+def is_pipeline_branch(branch: str) -> bool:
+    return bool(_PIPELINE_BRANCH_RE.match(branch or ""))
+
+
+def _open_pr_url(cfg: Config, worktree: Path, branch: str) -> str:
+    cp = subprocess.run(
+        ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url"],
+        cwd=worktree, capture_output=True, text=True, timeout=120,
+    )
+    try:
+        rows = json.loads(cp.stdout or "[]") if cp.returncode == 0 else []
+    except json.JSONDecodeError:
+        return ""
+    return rows[0]["url"] if rows else ""
 
 
 def _ensure_label(cfg: Config, name: str, color: str, desc: str) -> None:
@@ -88,9 +113,20 @@ def push_and_create(
     needs_qa: bool = False,
 ) -> str:
     """Push the branch and open a PR. Returns the PR URL."""
-    push = _git(worktree, "push", "-u", "origin", branch)
+    # Pipeline branches (task-<id>-…) are rebuilt from scratch on every run, so a branch
+    # left on the remote by an earlier attempt must be overwritten, or the push is
+    # rejected as non-fast-forward and the task can never recover.
+    push_args = ["push", "-u", "origin", branch]
+    if is_pipeline_branch(branch):
+        push_args.insert(1, "--force")
+    push = _git(worktree, *push_args)
     if push.returncode != 0:
         raise RuntimeError(f"git push failed: {push.stderr.strip()}")
+
+    existing = _open_pr_url(cfg, worktree, branch)
+    if existing:  # an earlier attempt already opened the PR; the force-push updated it
+        log.info("PR already open for %s: %s", branch, existing)
+        return existing
 
     body_file = worktree / "pr-body.md"
     body_file.write_text(body)
@@ -126,7 +162,7 @@ def open_worker_prs(cfg: Config) -> list[dict]:
             "--label", cfg.pr_label,
             "--state", "all",
             "--json", "number,state,headRefName,url,mergedAt,mergeCommit",
-            "--limit", "100",
+            "--limit", "500",
         ],
         cwd=cfg.repo_path,
         capture_output=True,
@@ -136,8 +172,6 @@ def open_worker_prs(cfg: Config) -> list[dict]:
     if cp.returncode != 0:
         log.warning("gh pr list failed: %s", cp.stderr.strip())
         return []
-    import json
-
     try:
         return json.loads(cp.stdout or "[]")
     except json.JSONDecodeError:

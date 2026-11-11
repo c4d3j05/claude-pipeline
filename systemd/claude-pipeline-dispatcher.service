@@ -13,6 +13,8 @@ Restart=always
 RestartSec=5
 # SIGTERM the dispatcher only; workers run in their own sessions and are reaped by its handler.
 KillMode=mixed
+# Let in-flight tasks finish on stop/restart; the default 90s would SIGKILL every worker.
+TimeoutStopSec=2h
 StandardOutput=append:__PIPELINE_DIR__/logs/dispatcher.out.log
 StandardError=append:__PIPELINE_DIR__/logs/dispatcher.err.log
 

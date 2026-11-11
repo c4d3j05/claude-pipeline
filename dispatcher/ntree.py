@@ -36,11 +36,34 @@ class Ntree:
             env=clean_env(),
         )
 
-    def new(self, slug: str) -> Path:
+    def base_ref(self) -> str:
+        """The ref workspaces fork from and PRs are diffed against.
+
+        Fetches first so workers never start from a stale local branch; prefers
+        `origin/<base>` when it exists, else falls back to the local base branch.
+        """
+        try:
+            subprocess.run(["git", "fetch", "--quiet", "origin", self.base], cwd=self.repo,
+                           capture_output=True, text=True, timeout=120, env=clean_env())
+            cp = subprocess.run(
+                ["git", "rev-parse", "--verify", "--quiet", f"origin/{self.base}"],
+                cwd=self.repo, capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            log.warning("could not refresh %s from origin: %s", self.base, e)
+            return self.base
+        return f"origin/{self.base}" if cp.returncode == 0 else self.base
+
+    def new(self, slug: str, base_ref: str | None = None) -> Path:
         """Create the worktree + reserve ports + run NTREE_SETUP_CMD. Idempotent-ish."""
-        cp = self._run(["new", slug, "--from", self.base], timeout=1200)
-        if cp.returncode != 0 and "already" not in (cp.stderr + cp.stdout).lower():
+        cp = self._run(["new", slug, "--from", base_ref or self.base], timeout=1200)
+        out = (cp.stderr + cp.stdout)
+        if cp.returncode != 0 and "already" not in out.lower():
             raise NtreeError(f"ntree new {slug} failed: {cp.stderr.strip() or cp.stdout.strip()}")
+        # ntree exits 0 when NTREE_SETUP_CMD fails (it only warns). A workspace with
+        # broken dependencies would waste a whole worker run, so treat it as fatal.
+        if "setup exited" in out:
+            line = next((ln for ln in out.splitlines() if "setup exited" in ln), "setup failed")
+            raise NtreeError(f"ntree new {slug}: {line.strip()}")
         return self.path(slug)
 
     def path(self, slug: str) -> Path:

@@ -67,11 +67,36 @@ uv run claude-pipeline run                # foreground
 
 ### Linux (Debian/Ubuntu)
 
-Needs `git`, `gh`, `jq`, `lsof`, `netcat-openbsd`, `uv`, the `claude` CLI, and a Linux-capable
+Needs `git`, `gh`, `jq`, `lsof`, `netcat-openbsd`, `bubblewrap`, `socat` (Claude Code's
+sandbox on Linux; the worker settings set `failIfUnavailable`), `uv`, the `claude` CLI, and a Linux-capable
 [ntree](https://github.com/c4d3j05/ntree) (branch `feature/linux-support` or later).
 `scripts/install.sh` installs `systemd --user` units from `systemd/`. User services stop at
 logout unless you run `sudo loginctl enable-linger $USER`. Logs: `journalctl --user -u
 claude-pipeline-dispatcher -f` or `logs/dispatcher.err.log`.
+
+## Limits and recovery
+
+- **Per-task budget:** `TASK_CAP_USD` (default 10) covers the worker, its retries *and* the
+  review session. The daily cap (`DAILY_CAP_USD`) counts all of it too.
+- **Wall clock:** enforced by a watchdog, so a silent/hung `claude` is killed at
+  `WALL_CLOCK_LIMIT_MIN` instead of holding a slot forever.
+- **Failed sessions:** an errored `claude` run (expired auth, API error, crash) blocks the
+  task with the real reason instead of being fed to the gates.
+- **Gates re-verify:** tests *and* a clean working tree are re-checked after every worker
+  turn, so the PR contains exactly what was tested. A truncated review diff is flagged.
+- **Fresh base:** workers fork from `origin/<BASE_BRANCH>` after a fetch, and a failing
+  `NTREE_SETUP_CMD` fails the task.
+- **Restart:** interrupted tasks are moved to *Blocked* with a comment. Dragging a blocked
+  card back to **Ready** re-queues it with a fresh budget and retries. Only one dispatcher
+  can run per `PIPELINE_DB` (lock file `pipeline.lock`).
+- **Housekeeping:** blocked workspaces (worktree, branch, DB) are removed by the nightly job
+  after `BLOCKED_RETENTION_DAYS`; `DB_NAME_TEMPLATE` says which DB to drop.
+- **Stopping:** the dispatcher drains running tasks on SIGTERM (systemd allows up to 2h).
+- `prepare-repo` renders the worker's Stop hook from `TEST_CMD`; **commit** the generated
+  files to the base branch (`selftest` checks this).
+
+Not covered: CI-status / review-comment feedback loops, PR conflict handling, and sandboxing
+the dispatcher's own test run (worker-written tests execute with your privileges).
 
 ## Commands
 

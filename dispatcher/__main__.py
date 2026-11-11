@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
-from pathlib import Path
 
 from . import config as cfgmod
 from . import log as logmod
@@ -21,8 +21,7 @@ from .cleanup import nightly as run_nightly
 from .cleanup import process_closed_prs
 from .notify import Slack
 from .ntree import Ntree
-
-TEMPLATES = Path(__file__).resolve().parent.parent / "templates"
+from .repoprep import TEMPLATES, hook_command, render_worker_settings, stop_hook_command
 
 
 def _load(env_file: str):
@@ -96,13 +95,29 @@ def cmd_selftest(args) -> int:
         else:
             log.info("found %s", tool)
 
-    # target repo readiness
+    # target repo readiness — files must be COMMITTED on the base branch, because
+    # worktrees only contain tracked files.
+    base = Ntree(cfg.repo_path, cfg.base_branch).base_ref()
+    for rel in (cfg.settings_file, "CLAUDE.md"):
+        cp = subprocess.run(["git", "ls-tree", "--name-only", base, "--", rel],
+                            cwd=cfg.repo_path, capture_output=True, text=True)
+        if rel not in cp.stdout.split():
+            log.error("%s is not committed on %s — workers' worktrees won't have it "
+                      "(run `prepare-repo`, then commit and push it)", rel, base)
+            ok = False
     settings = cfg.repo_path / cfg.settings_file
-    if not settings.exists():
-        log.warning("target repo missing %s (run `prepare-repo`)", cfg.settings_file)
-    claude_md = cfg.repo_path / "CLAUDE.md"
-    if not claude_md.exists():
-        log.warning("target repo missing CLAUDE.md (spec: repo not eligible without it)")
+    if settings.exists():
+        cmd = hook_command(settings.read_text())
+        if cmd != stop_hook_command(cfg.test_cmd):
+            log.warning("Stop hook in %s does not run TEST_CMD (%s); re-run `prepare-repo` "
+                        "so the worker's hook and the dispatcher's gate agree",
+                        cfg.settings_file, cfg.test_cmd)
+    if sys.platform.startswith("linux"):
+        for tool in ("bwrap", "socat"):
+            if shutil.which(tool) is None:
+                log.warning("%s not found: Claude Code's sandbox needs it on Linux and the "
+                            "worker settings set failIfUnavailable (apt install bubblewrap socat)",
+                            tool)
 
     print("SELFTEST:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
@@ -122,7 +137,9 @@ def cmd_nightly(args) -> int:
     cfg = _load(args.env)
     ntree = Ntree(cfg.repo_path, cfg.base_branch)
     slack = Slack(cfg.slack_webhook)
-    summary = run_nightly(cfg, ntree, slack)
+    from .db import Ledger
+
+    summary = run_nightly(cfg, ntree, slack, Ledger(cfg.db_path))
     slack.nightly(summary)
     return 0
 
@@ -132,7 +149,7 @@ def cmd_prepare_repo(args) -> int:
     log = logmod.get("prepare-repo")
     dest_settings = cfg.repo_path / ".claude" / "worker-settings.json"
     dest_settings.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(TEMPLATES / "worker-settings.json", dest_settings)
+    dest_settings.write_text(render_worker_settings(cfg.test_cmd))
     log.info("wrote %s", dest_settings)
 
     dest_claude = cfg.repo_path / "CLAUDE.md"
@@ -142,7 +159,8 @@ def cmd_prepare_repo(args) -> int:
     else:
         shutil.copyfile(TEMPLATES / "CLAUDE.md.template", dest_claude)
         log.info("wrote %s (edit it before enabling the repo)", dest_claude)
-    print("Prepared. Review the two files, then run `claude-pipeline selftest`.")
+    print("Prepared. Review the two files, COMMIT them to the base branch (worktrees only\n"
+          "contain tracked files), then run `claude-pipeline selftest`.")
     return 0
 
 

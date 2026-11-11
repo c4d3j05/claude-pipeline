@@ -1,0 +1,357 @@
+"""Regression tests for the pipeline gaps found in the audit.
+
+A fake `claude` (and `ntree`) on PATH exercises the real launcher, watchdog and review
+code without network access.
+"""
+
+from __future__ import annotations
+
+import stat
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+
+from dispatcher import cleanup, repoprep
+from dispatcher import config as cfgmod
+from dispatcher import daemon as dmod
+from dispatcher.db import Ledger
+from dispatcher.ntree import Ntree, NtreeError
+from dispatcher.pr import is_pipeline_branch
+from dispatcher.review import MAX_DIFF_CHARS, adversarial_review
+from dispatcher.stream import SessionResult
+from dispatcher.worker import launch
+
+FAKE_CLAUDE = """#!/usr/bin/env python3
+import json, os, sys, time
+prompt = sys.stdin.read()
+open(os.environ["FAKE_PROMPT_OUT"], "w").write(prompt)
+mode = os.environ.get("FAKE_MODE", "ok")
+print(json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}), flush=True)
+if mode == "hang":
+    time.sleep(60)
+text = os.environ.get("FAKE_TEXT", "done")
+print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}), flush=True)
+err = mode == "error"
+print(json.dumps({"type": "result", "total_cost_usd": 0.5, "num_turns": 3,
+                  "is_error": err, "result": text}), flush=True)
+sys.exit(1 if err else 0)
+"""
+
+
+def _script(path: Path, body: str) -> None:
+    path.write_text(body)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+@pytest.fixture
+def fake_bin(tmp_path, monkeypatch):
+    b = tmp_path / "bin"
+    b.mkdir()
+    _script(b / "claude", FAKE_CLAUDE)
+    monkeypatch.setenv("PATH", f"{b}:{__import__('os').environ['PATH']}")
+    monkeypatch.setenv("FAKE_PROMPT_OUT", str(tmp_path / "prompt.txt"))
+    return b
+
+
+def _launch(tmp_path, prompt="hello", wall=1, **kw):
+    return launch(worktree=tmp_path, prompt=prompt, settings_file="s.json",
+                  session_log=tmp_path / "logs" / "s.jsonl", max_turns=5,
+                  wall_clock_limit_min=wall, **kw)
+
+
+def _git(repo, *args):
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True,
+                   env={"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+                        "GIT_COMMITTER_EMAIL": "t@t", "PATH": __import__("os").environ["PATH"],
+                        "HOME": str(repo)})
+
+
+def _cfg(tmp_path, repo=None, **extra):
+    env = tmp_path / ".env"
+    lines = {"VIKUNJA_URL": "http://x/api/v1", "VIKUNJA_API_TOKEN": "t", "VIKUNJA_PROJECT_ID": "1",
+             "TARGET_REPO_PATH": str(repo or tmp_path), "PIPELINE_DB": str(tmp_path / "p.db"),
+             "BASE_BRANCH": "main", **extra}
+    env.write_text("\n".join(f"{k}={v}" for k, v in lines.items()))
+    return cfgmod.load(str(env))
+
+
+# --- worker launcher -------------------------------------------------------
+def test_prompt_is_sent_on_stdin_not_argv(tmp_path, fake_bin):
+    big = "x" * 300_000  # would exceed Linux's 128 KiB single-argument limit as argv
+    result, rc = _launch(tmp_path, prompt=big)
+    assert rc == 0 and result.session_id == "s1" and result.cost_usd == 0.5
+    assert (tmp_path / "prompt.txt").read_text() == big
+
+
+def test_silent_hang_is_killed_by_watchdog(tmp_path, fake_bin, monkeypatch):
+    monkeypatch.setenv("FAKE_MODE", "hang")
+    t0 = time.monotonic()
+    _result, rc = _launch(tmp_path, wall=0.03)  # ~2s
+    assert rc == 124
+    assert time.monotonic() - t0 < 20
+
+
+def test_session_log_is_appended_not_truncated(tmp_path, fake_bin):
+    _launch(tmp_path)
+    first = (tmp_path / "logs" / "s.jsonl").read_text()
+    _launch(tmp_path)
+    assert (tmp_path / "logs" / "s.jsonl").read_text() == first * 2
+
+
+# --- error / cap detection --------------------------------------------------
+def _dispatcher(tmp_path, **extra):
+    return dmod.Dispatcher(_cfg(tmp_path, **extra), str(tmp_path / ".env"))
+
+
+def test_errored_worker_is_blocked_not_gated(tmp_path):
+    d = _dispatcher(tmp_path)
+    res = SessionResult(is_error=True, result_text="Invalid API key", num_turns=1)
+    assert "worker error" in d._cap_hit(res, 1) and "Invalid API key" in d._cap_hit(res, 1)
+    assert d._cap_hit(SessionResult(num_turns=1), 0) is None
+
+
+def test_per_task_cost_cap(tmp_path):
+    d = _dispatcher(tmp_path, TASK_CAP_USD="1.0")
+    d.ledger.upsert_claim(1, "task-1-a", "task-1-a")
+    assert d._over_task_budget(1) is None
+    d.ledger.add_cost(1, 1.2)
+    assert "task cost" in d._over_task_budget(1)
+
+
+def test_requeue_resets_budget_and_retries(tmp_path):
+    led = Ledger(tmp_path / "l.db")
+    led.upsert_claim(1, "s", "s")
+    led.update(1, test_retries=2, review_retries=1, state="blocked")
+    led.add_cost(1, 9.0)
+    led.upsert_claim(1, "s", "s")
+    row = led.get(1)
+    assert (row["test_retries"], row["review_retries"], row["cost_usd"]) == (0, 0, 0)
+
+
+# --- review gate --------------------------------------------------------------
+@pytest.fixture
+def repo(tmp_path):
+    r = tmp_path / "repo"
+    r.mkdir()
+    _git(r, "init", "-q", "-b", "main")
+    (r / "a.txt").write_text("a\n")
+    _git(r, "add", "."); _git(r, "commit", "-qm", "base")
+    _git(r, "checkout", "-qb", "task-1-x")
+    return r
+
+
+def _change(repo, size=10):
+    (repo / "b.txt").write_text("b" * size + "\n")
+    _git(repo, "add", "."); _git(repo, "commit", "-qm", "work")
+
+
+def test_review_cost_is_reported(tmp_path, repo, fake_bin, monkeypatch):
+    _change(repo)
+    monkeypatch.setenv("FAKE_TEXT", '{"verdict":"pass","findings":[]}')
+    v = adversarial_review(_cfg(tmp_path, repo), repo, "spec", tmp_path / "r.jsonl")
+    assert v["verdict"] == "pass" and v["cost_usd"] == 0.5 and not v["truncated"]
+
+
+def test_review_session_failure_is_flagged_as_error(tmp_path, repo, fake_bin, monkeypatch):
+    _change(repo)
+    monkeypatch.setenv("FAKE_MODE", "error")
+    monkeypatch.setenv("FAKE_TEXT", "API overloaded")
+    v = adversarial_review(_cfg(tmp_path, repo), repo, "spec", tmp_path / "r.jsonl")
+    assert v["verdict"] == "block" and v["error"] is True
+
+
+def test_truncated_diff_cannot_pass_silently(tmp_path, repo, fake_bin, monkeypatch):
+    _change(repo, size=MAX_DIFF_CHARS + 5000)
+    monkeypatch.setenv("FAKE_TEXT", '{"verdict":"pass","findings":[]}')
+    v = adversarial_review(_cfg(tmp_path, repo), repo, "spec", tmp_path / "r.jsonl")
+    assert v["truncated"] is True
+    assert any("only the first" in f["note"] for f in v["findings"])
+
+
+def test_unrecognised_verdict_is_a_block(tmp_path, repo, fake_bin, monkeypatch):
+    _change(repo)
+    monkeypatch.setenv("FAKE_TEXT", '{"verdict":"looks good"}')
+    v = adversarial_review(_cfg(tmp_path, repo), repo, "spec", tmp_path / "r.jsonl")
+    assert v["verdict"] == "block"
+
+
+# --- gate loop: re-verify after every worker turn -----------------------------
+def test_verify_reruns_tests_after_commit_or_discard(tmp_path, monkeypatch):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    runs, dirty = [], iter([True, False])
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: (runs.append(1) or True, ""))
+    monkeypatch.setattr(dmod, "working_tree_dirty", lambda wt: next(dirty))
+    monkeypatch.setattr(d, "_resume_step", lambda *a: None)
+    assert d._verify(1, tmp_path, "s", dmod._Run(SessionResult(), "sid")) is None
+    assert len(runs) == 2  # tests ran again after the discard turn
+
+
+def test_verify_blocks_if_still_dirty_after_settle_turn(tmp_path, monkeypatch):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: (True, ""))
+    monkeypatch.setattr(dmod, "working_tree_dirty", lambda wt: True)
+    monkeypatch.setattr(d, "_resume_step", lambda *a: None)
+    stop = d._verify(1, tmp_path, "s", dmod._Run(SessionResult(), "sid"))
+    assert stop and stop[0] == "block" and "uncommitted" in stop[1]
+
+
+# --- claiming / restart ---------------------------------------------------------
+class _VK:
+    def __init__(self, marker=False):
+        self.marker = marker
+
+    def board(self, *_):
+        return [{"title": "Ready", "tasks": [{"id": 1, "labels": [{"title": "claude"}]}]}]
+
+    def tasks_in_bucket(self, b):
+        return b["tasks"]
+
+    def task_labels(self, t):
+        return {"claude"}
+
+    def has_comment_prefix(self, *_):
+        return self.marker
+
+
+@pytest.mark.parametrize("state,marker,expected", [
+    (None, False, 1),        # fresh card
+    (None, True, 0),         # claimed before, ledger lost: don't double-claim
+    ("blocked", True, 1),    # human moved a blocked card back to Ready: retry
+    ("pr_open", True, 0),
+    ("working", True, 0),
+    ("done", True, 0),
+])
+def test_ready_tasks_claim_guard(tmp_path, state, marker, expected):
+    d = _dispatcher(tmp_path)
+    d.vk = _VK(marker)
+    if state:
+        d.ledger.upsert_claim(1, "s", "s")
+        d.ledger.update(1, state=state)
+    assert len(d.ready_tasks(limit=5)) == expected
+
+
+def test_reap_orphans_moves_card_and_never_kills_non_claude_pid(tmp_path, monkeypatch):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d.ledger.update(1, state="working", pid=1)  # pid 1 is alive but is not claude
+    moved, killed = [], []
+    monkeypatch.setattr(d, "move", lambda tid, key: moved.append((tid, key)))
+    monkeypatch.setattr(d, "comment", lambda *a: None)
+    monkeypatch.setattr(dmod, "kill_group", lambda pid: killed.append(pid))
+    d.reap_orphans()
+    assert d.ledger.get(1)["state"] == "blocked" and d.ledger.get(1)["pid"] is None
+    assert moved == [(1, "blocked")] and killed == []
+
+
+def test_second_dispatcher_cannot_start(tmp_path):
+    lock = tmp_path / "p.lock"
+    first = dmod._acquire_instance_lock(lock)
+    with pytest.raises(SystemExit):
+        dmod._acquire_instance_lock(lock)
+    first.close()
+
+
+# --- cleanup ------------------------------------------------------------------------
+def test_old_closed_pr_does_not_tear_down_requeued_task():
+    prs = [{"headRefName": "task-1-x", "state": "CLOSED"},
+           {"headRefName": "task-1-x", "state": "OPEN"},
+           {"headRefName": "task-2-y", "state": "MERGED"}]
+    assert [p["headRefName"] for p in cleanup.closed_prs_to_process(prs)] == ["task-2-y"]
+
+
+def test_stale_blocked_pruned_once(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, BLOCKED_RETENTION_DAYS="0")
+    led = Ledger(tmp_path / "l.db")
+    led.upsert_claim(1, "task-1-x", "task-1-x")
+    led.update(1, state="blocked")
+    time.sleep(1.1)
+    calls = []
+    nt = Ntree(tmp_path)
+    monkeypatch.setattr(nt, "rm", lambda s: calls.append(("rm", s)))
+    monkeypatch.setattr(nt, "remove_branch", lambda s: calls.append(("branch", s)))
+    assert cleanup.prune_stale(cfg, led, nt) == ["task-1-x"]
+    assert cleanup.prune_stale(cfg, led, nt) == []  # not repeated
+    assert ("rm", "task-1-x") in calls and ("branch", "task-1-x") in calls
+
+
+# --- ntree wrapper / PR / repo prep ----------------------------------------------------
+def test_failed_setup_command_is_fatal(tmp_path, monkeypatch):
+    b = tmp_path / "bin"; b.mkdir()
+    _script(b / "ntree", '#!/bin/sh\necho "! setup exited 1 — deps may be incomplete" >&2\nexit 0\n')
+    monkeypatch.setenv("PATH", f"{b}:{__import__('os').environ['PATH']}")
+    with pytest.raises(NtreeError, match="setup exited"):
+        Ntree(tmp_path).new("task-1-x")
+
+
+def test_pipeline_branch_detection():
+    assert is_pipeline_branch("task-12-add-login")
+    assert not is_pipeline_branch("main") and not is_pipeline_branch("feature/task-1")
+
+
+def test_stop_hook_fails_when_tests_fail_even_under_dash(tmp_path, monkeypatch):
+    b = tmp_path / "bin"; b.mkdir()
+    _script(b / "ntree", "#!/bin/sh\necho FAIL\nexit 3\n")
+    monkeypatch.setenv("PATH", f"{b}:{__import__('os').environ['PATH']}")
+    monkeypatch.setenv("NTREE_WORKSPACE", "w")
+    cp = subprocess.run(["sh", "-c", repoprep.stop_hook_command("uv run pytest -x -q")],
+                        capture_output=True, text=True)
+    assert cp.returncode != 0 and "FAIL" in cp.stdout
+
+
+def test_rendered_settings_use_test_cmd():
+    text = repoprep.render_worker_settings("npm test")
+    assert "npm test" in repoprep.hook_command(text)
+    assert repoprep.hook_command(text) == repoprep.stop_hook_command("npm test")
+
+
+# --- end to end: the real run_pipeline against a fake claude and a real git repo -------
+@pytest.fixture
+def pipeline(tmp_path, repo, fake_bin, monkeypatch):
+    _change(repo)  # the "worker's" commit, present on branch task-1-x
+    d = _dispatcher(tmp_path, TARGET_REPO_PATH=str(repo), TASK_CAP_USD="10")
+    d.logs_root = tmp_path / "logs"
+    events = {"moved": [], "comments": [], "prs": [], "slack": []}
+    d.move = lambda tid, key: events["moved"].append(key)
+    d.comment = lambda tid, text: events["comments"].append(text)
+    d.slack.task_blocked = lambda *a: events["slack"].append(a)
+    d.slack.pr_opened = lambda *a: events["slack"].append(a)
+    monkeypatch.setattr(d.ntree, "base_ref", lambda: "main")
+    monkeypatch.setattr(d.ntree, "rm", lambda s: None)
+    monkeypatch.setattr(d.ntree, "remove_branch", lambda s: None)
+    monkeypatch.setattr(d.ntree, "new", lambda s, b=None: repo)
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: (True, ""))
+    monkeypatch.setattr(dmod.prmod, "push_and_create",
+                        lambda **kw: events["prs"].append(kw["branch"]) or "https://gh/pr/1")
+    monkeypatch.setenv("FAKE_TEXT", '{"verdict":"pass","findings":[]}')
+    d.ledger.upsert_claim(1, "task-1-x", "task-1-x")
+    return d, events
+
+
+def test_happy_path_opens_pr_and_counts_worker_and_review_cost(pipeline):
+    d, ev = pipeline
+    d.run_pipeline({"id": 1, "title": "x", "description": "<p>do it</p>"}, "task-1-x")
+    row = d.ledger.get(1)
+    assert row["state"] == "pr_open" and row["pid"] is None
+    assert ev["prs"] == ["task-1-x"] and ev["moved"] == ["review"]
+    assert row["cost_usd"] == pytest.approx(1.0)  # 0.5 worker + 0.5 review
+
+
+def test_errored_worker_blocks_with_real_reason(pipeline, monkeypatch):
+    d, ev = pipeline
+    monkeypatch.setenv("FAKE_MODE", "error")
+    monkeypatch.setenv("FAKE_TEXT", "Invalid API key")
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert d.ledger.get(1)["state"] == "blocked" and ev["prs"] == []
+    assert any("worker error" in c and "Invalid API key" in c for c in ev["comments"])
+
+
+def test_cost_cap_stops_before_review(pipeline):
+    d, ev = pipeline
+    object.__setattr__(d.cfg, "task_cap_usd", 0.4)  # one worker run (0.5) already exceeds it
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert d.ledger.get(1)["state"] == "blocked" and ev["prs"] == []
+    assert any("task cost" in c for c in ev["comments"])

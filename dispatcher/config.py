@@ -80,17 +80,22 @@ class Config:
 
     # Budget (hot-reloadable)
     daily_cap_usd: float
+    task_cap_usd: float
 
     # Notifications / paths
     slack_webhook: str
     db_path: Path
     log_level: str
 
+    # Housekeeping
+    blocked_retention_days: int = 7
+    db_name_template: str = "app_{slug}"   # per-workspace DB dropped on teardown
+
     settings_file: str = ".claude/worker-settings.json"
 
     # Knobs the dashboard may edit and the daemon hot-reloads each tick.
     HOT_KEYS = (
-        "MAX_WORKERS", "POLL_INTERVAL", "DAILY_CAP_USD",
+        "MAX_WORKERS", "POLL_INTERVAL", "DAILY_CAP_USD", "TASK_CAP_USD",
         "WORKER_MODEL", "REVIEW_MODEL", "PERMISSION_MODE",
         "MAX_TURNS", "WALL_CLOCK_LIMIT_MIN", "MAX_TEST_RETRIES", "MAX_REVIEW_RETRIES",
     )
@@ -133,6 +138,9 @@ def load(env_file: str | None = ".env") -> Config:
         review_model=_str(src, "REVIEW_MODEL"),
         permission_mode=_str(src, "PERMISSION_MODE", "acceptEdits"),
         daily_cap_usd=_float(src, "DAILY_CAP_USD", 50.0),
+        task_cap_usd=_float(src, "TASK_CAP_USD", 10.0),
+        blocked_retention_days=_int(src, "BLOCKED_RETENTION_DAYS", 7),
+        db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),
         db_path=Path(_str(src, "PIPELINE_DB", "pipeline.db")).expanduser(),
         log_level=_str(src, "LOG_LEVEL", "INFO").upper(),

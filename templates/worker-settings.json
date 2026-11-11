@@ -13,7 +13,11 @@
       "Edit(secrets/**)",
       "Edit(infra/**)",
       "Read(.env*)",
-      "Read(secrets/**)"
+      "Read(secrets/**)",
+      "Bash(git * push*)",
+      "Bash(rm -fr*)",
+      "Bash(rm -r -f*)",
+      "Bash(rm --recursive*)"
     ]
   },
   "sandbox": {
@@ -35,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "ntree run $NTREE_WORKSPACE -- uv run pytest -x -q 2>&1 | tail -40; exit ${PIPESTATUS[0]}",
+            "command": "bash -c 'set -o pipefail; ntree run \"$NTREE_WORKSPACE\" -- uv run pytest -x -q 2>&1 | tail -40'",
             "timeout": 600
           }
         ]

@@ -34,6 +34,9 @@ def working_tree_dirty(worktree: Path) -> bool:
     return bool(cp.stdout.strip())
 
 
+MAX_DIFF_CHARS = 200_000   # prompt goes via stdin, so this is a cost limit, not an argv limit
+
+
 def diff_against_base(worktree: Path, base: str) -> str:
     cp = subprocess.run(
         ["git", "diff", f"{base}...HEAD"],
@@ -45,19 +48,27 @@ def diff_against_base(worktree: Path, base: str) -> str:
 
 
 def adversarial_review(
-    cfg: Config, worktree: Path, spec: str, session_log: Path
+    cfg: Config, worktree: Path, spec: str, session_log: Path, base_ref: str | None = None
 ) -> dict:
-    """Run a read-only reviewer session; return {"verdict": ..., "findings": [...]}."""
-    diff = diff_against_base(worktree, cfg.base_branch)
+    """Run a read-only reviewer session; return the verdict dict.
+
+    Keys: verdict ("pass"|"block"), findings, cost_usd (so the caller can account it),
+    truncated (the diff exceeded MAX_DIFF_CHARS), error (the reviewer session itself
+    failed — distinct from a real "block", and not the worker's fault).
+    """
+    diff = diff_against_base(worktree, base_ref or cfg.base_branch)
     if not diff.strip():
-        return {"verdict": "block", "findings": [
+        return {"verdict": "block", "cost_usd": 0.0, "findings": [
             {"severity": "high", "file": "-", "line": 0,
              "note": "empty diff against base — nothing was changed"}]}
 
-    prompt = review_prompt(spec, diff[:60000])
-    result, _rc = launch(
+    truncated = len(diff) > MAX_DIFF_CHARS
+    shown = diff[:MAX_DIFF_CHARS]
+    if truncated:
+        shown += f"\n... [diff truncated: showing {MAX_DIFF_CHARS} of {len(diff)} chars]"
+    result, rc = launch(
         worktree=worktree,
-        prompt=prompt,
+        prompt=review_prompt(spec, shown),
         settings_file=cfg.settings_file,
         session_log=session_log,
         max_turns=8,
@@ -66,14 +77,24 @@ def adversarial_review(
         permission_mode="plan",  # read-only
         read_only=True,
     )
+    cost = result.cost_usd
     verdict = _extract_json(result.result_text or result.last_message)
     if verdict is None:
-        log.warning("review produced no parseable JSON; treating as block")
-        return {"verdict": "block", "findings": [
+        failed = rc != 0 or result.is_error
+        log.warning("review produced no parseable JSON (rc=%s); treating as block", rc)
+        return {"verdict": "block", "cost_usd": cost, "error": failed, "findings": [
             {"severity": "medium", "file": "-", "line": 0,
-             "note": "reviewer returned no valid JSON verdict"}]}
+             "note": f"reviewer session failed (rc={rc})" if failed
+             else "reviewer returned no valid JSON verdict"}]}
     verdict.setdefault("findings", [])
-    verdict.setdefault("verdict", "block")
+    if verdict.get("verdict") not in ("pass", "block"):
+        verdict["verdict"] = "block"   # anything unrecognised is not a pass
+    verdict["cost_usd"] = cost
+    verdict["truncated"] = truncated
+    if truncated and verdict["verdict"] == "pass":
+        verdict["findings"].append({
+            "severity": "medium", "file": "-", "line": 0,
+            "note": f"reviewer saw only the first {MAX_DIFF_CHARS} of {len(diff)} diff chars"})
     return verdict
 
 

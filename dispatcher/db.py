@@ -67,6 +67,8 @@ class Ledger:
 
     def _migrate(self) -> None:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)")}
+        if "pruned" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN pruned INTEGER NOT NULL DEFAULT 0")
         if "cancel_requested" not in cols:
             self.conn.execute(
                 "ALTER TABLE tasks ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
@@ -80,7 +82,10 @@ class Ledger:
                    VALUES (?, ?, ?, 'claimed', ?, ?)
                    ON CONFLICT(task_id) DO UPDATE SET
                        slug=excluded.slug, branch=excluded.branch,
-                       state='claimed', updated_at=excluded.updated_at""",
+                       state='claimed', updated_at=excluded.updated_at,
+                       -- a re-queued task is a fresh attempt: fresh budget and retries
+                       test_retries=0, review_retries=0, cost_usd=0,
+                       cancel_requested=0, pruned=0, pid=NULL, pr_url=NULL""",
                 (task_id, slug, branch, _now(), _now()),
             )
             self.conn.commit()
@@ -192,6 +197,15 @@ class Ledger:
             return self.conn.execute(
                 f"SELECT * FROM tasks WHERE cancel_requested=1 AND state IN ({q})",
                 ACTIVE_STATES,
+            ).fetchall()
+
+    def stale_blocked(self, older_than_days: int) -> list[sqlite3.Row]:
+        """Blocked tasks whose worktree is still around past the retention window."""
+        cutoff = (dt.datetime.now() - dt.timedelta(days=older_than_days)).isoformat(timespec="seconds")
+        with self._lock:
+            return self.conn.execute(
+                "SELECT * FROM tasks WHERE state='blocked' AND pruned=0 AND updated_at < ?",
+                (cutoff,),
             ).fetchall()
 
     def delete_task(self, task_id: int) -> None:
