@@ -60,6 +60,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 _SECRET_VARS = (
     "GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN", "VIKUNJA_TOKEN", "VIKUNJA_API_TOKEN", "SLACK_WEBHOOK_URL",
+    "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN",
 )
 # Names that look like credentials: loaded from ~/.worker.env only when a scope asks for them.
 _SECRETISH = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY", re.IGNORECASE)

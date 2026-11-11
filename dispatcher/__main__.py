@@ -89,9 +89,34 @@ def cmd_selftest(args) -> int:
                 ok = False
         label_id = vk.ensure_label(cfg.claude_label)
         log.info("label '%s' id=%s", cfg.claude_label, label_id)
+        from .vikunja import stuck_dependents
+
+        for tid, blocker in stuck_dependents(vk.board(cfg.project_id, view), cfg.bucket_ready,
+                                             cfg.bucket_blocked, cfg.claude_label):
+            log.warning("task %s is in %s but waits for task %s, which is in %s: it will not "
+                        "start until that one is dealt with", tid, cfg.bucket_ready, blocker,
+                        cfg.bucket_blocked)
     except Exception as e:  # noqa: BLE001
         log.error("Vikunja check failed: %s", e)
         ok = False
+
+    # Slack: the planner bot's token, used to post task events into planner threads
+    if cfg.slack_bot_token:
+        try:
+            import requests
+
+            r = requests.post("https://slack.com/api/auth.test", timeout=15,
+                              headers={"Authorization": f"Bearer {cfg.slack_bot_token}"}).json()
+            if r.get("ok"):
+                log.info("Slack bot token OK: workspace %s, bot %s", r.get("team"), r.get("user"))
+            else:
+                log.error("SLACK_BOT_TOKEN rejected by Slack: %s", r.get("error"))
+                ok = False
+        except Exception as e:  # noqa: BLE001
+            log.error("Slack check failed: %s", e)
+            ok = False
+    else:
+        log.info("SLACK_BOT_TOKEN not set: task events go to the webhook channel only")
 
     # ntree + gh
     for tool in ("ntree", "gh", "claude", "git"):

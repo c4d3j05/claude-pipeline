@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 
 import requests
 
+from . import slackthread
 from .log import get
 
 log = get("notify")
@@ -42,8 +44,32 @@ def next_step(reason: str, resumable: bool) -> str:
 
 
 class Slack:
-    def __init__(self, webhook_url: str):
+    """Messages go to the webhook channel. The events of a task that claude-planner filed (PR
+    opened, blocked, merged, PR needs attention) go to that task's planner thread instead, using
+    the planner bot's token; with no thread, no token, or a failed post they fall back to the
+    webhook, so a notification is never lost and Slack can never fail a task."""
+
+    def __init__(self, webhook_url: str, bot_token: str = "",
+                 thread_for: Callable[[int], tuple[str, str] | None] | None = None,
+                 http_post=requests.post):
         self.url = webhook_url
+        self.bot_token = bot_token
+        self._thread_for = thread_for
+        self._http_post = http_post
+
+    def post_for_task(self, task_id: int, text: str) -> None:
+        if self.bot_token and self._thread_for:
+            try:
+                found = self._thread_for(task_id)
+            except Exception as e:  # noqa: BLE001 - a ledger problem must not stop a notification
+                log.warning("could not look up the thread of task %s: %s", task_id, e)
+                found = None
+            if found and slackthread.post(self.bot_token, slackthread.Thread(*found), text,
+                                          http_post=self._http_post):
+                return
+            if found:
+                log.warning("task %s: thread post failed, using the webhook", task_id)
+        self.post(text)
 
     def post(self, text: str) -> None:
         if not self.url:
@@ -69,7 +95,7 @@ class Slack:
                 spent += f" ({_money(lifetime)} over the task's life)"
             lines.append(spent)
         lines += [f"*Next:* {next_step(reason, resumable)}", link]
-        self.post("\n".join(lines))
+        self.post_for_task(task_id, "\n".join(lines))
 
     def task_merged(self, task_id: int, pr_url: str, cost: float | None = None,
                     lifetime: float | None = None) -> None:
@@ -79,10 +105,13 @@ class Slack:
             if lifetime is not None and abs(lifetime - cost) > 0.005:
                 spent += f" ({_money(lifetime)} over the task's life)"
             lines.append(spent + ". Card moved to Done; workspace and branch cleaned up.")
-        self.post("\n".join(lines))
+        self.post_for_task(task_id, "\n".join(lines))
 
     def pr_opened(self, task_id: int, pr_url: str) -> None:
-        self.post(f":rocket: PR opened for task {task_id}: {pr_url}")
+        self.post_for_task(task_id, f":rocket: PR opened for task {task_id}: {pr_url}")
+
+    def pr_needs_attention(self, task_id: int, problem: str, pr_url: str) -> None:
+        self.post_for_task(task_id, f":warning: Task {task_id}: PR needs attention: {problem} {pr_url}")
 
     def daily_cap(self, spent: float, cap: float) -> None:
         self.post(f":moneybag: Daily cap reached: ${spent:.2f} / ${cap:.2f}. Dispatching paused.")

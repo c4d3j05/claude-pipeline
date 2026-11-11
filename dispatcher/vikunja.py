@@ -150,3 +150,19 @@ def open_blockers(task: dict) -> list[int]:
     """
     rel = (task.get("related_tasks") or {}).get("blocked") or []
     return [r["id"] for r in rel if not r.get("done")]
+
+
+def stuck_dependents(board: list[dict], ready: str, blocked: str, label: str) -> list[tuple[int, int]]:
+    """(task, blocker) pairs where a claude-labelled Ready task waits for a task sitting in the
+    Blocked bucket. Such a task never starts on its own: the blocker needs a human first."""
+    where = {t["id"]: b["title"].strip().lower() for b in board for t in (b.get("tasks") or [])}
+    out: list[tuple[int, int]] = []
+    for b in board:
+        if b["title"].strip().lower() != ready.strip().lower():
+            continue
+        for t in b.get("tasks") or []:
+            if t.get("done") or label.lower() not in {x["title"].strip().lower() for x in t.get("labels") or []}:
+                continue
+            out += [(t["id"], blocker) for blocker in open_blockers(t)
+                    if where.get(blocker) == blocked.strip().lower()]
+    return out
