@@ -22,13 +22,13 @@ def task_id_from_branch(branch: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _dropdb(slug: str) -> None:
-    """Best-effort drop of the per-workspace database (spec: dropdb app_<slug>).
+def _dropdb(cfg: Config, slug: str) -> None:
+    """Best-effort drop of the per-workspace database (name from DB_NAME_TEMPLATE).
 
     No-op if `dropdb` isn't installed (e.g. Postgres runs in Docker and per-workspace
     test DBs are created/dropped by the test runner). Never raises.
     """
-    db = f"app_{slug.replace('-', '_')}"
+    db = cfg.db_name_template.format(slug=slug.replace("-", "_"))
     try:
         cp = subprocess.run(["dropdb", "--if-exists", db], capture_output=True, text=True)
         if cp.returncode != 0:
@@ -45,15 +45,24 @@ def _safe(label: str, slug: str, fn) -> None:
         log.warning("teardown step '%s' failed for %s: %s", label, slug, e)
 
 
+def closed_prs_to_process(prs: list[dict]) -> list[dict]:
+    """Merged/closed PRs, minus any whose branch has a newer OPEN PR.
+
+    A re-queued task reuses its branch name, so an old closed PR must not tear down
+    the workspace backing the new open one.
+    """
+    open_heads = {p.get("headRefName") for p in prs if p.get("state") == "OPEN"}
+    return [p for p in prs
+            if p.get("state") in ("MERGED", "CLOSED") and p.get("headRefName") not in open_heads]
+
+
 def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, buckets, slack: Slack) -> None:
     """Poll worker PRs; for any that closed, tear down and update Vikunja.
 
     `buckets` is the {ready/in_progress/review/done/blocked -> bucket dict} map,
     `vikunja` is the Vikunja client. `view_id` comes from buckets via caller.
     """
-    for pr in open_worker_prs(cfg):
-        if pr.get("state") not in ("MERGED", "CLOSED"):
-            continue
+    for pr in closed_prs_to_process(open_worker_prs(cfg)):
         branch = pr.get("headRefName", "")
         task_id = task_id_from_branch(branch)
         if task_id is None:
@@ -70,7 +79,7 @@ def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, bucke
         # Resource teardown — each step best-effort so one failure can't strand the
         # task (the Vikunja move + ledger update below MUST still run, else we loop).
         _safe("ntree rm", slug, lambda slug=slug: ntree.rm(slug))       # frees ports, removes worktree
-        _safe("dropdb", slug, lambda slug=slug: _dropdb(slug))          # drop per-workspace DB
+        _safe("dropdb", slug, lambda slug=slug: _dropdb(cfg, slug))          # drop per-workspace DB
         _safe("branch -D", slug, lambda branch=branch: subprocess.run(  # local branch
             ["git", "branch", "-D", branch], cwd=cfg.repo_path, capture_output=True, text=True))
         _safe("push --delete", slug, lambda branch=branch: subprocess.run(  # remote (if auto-delete off)
@@ -91,9 +100,33 @@ def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, bucke
         ledger.update(task_id, state="done" if merged else "blocked", pr_url=pr.get("url"))
 
 
-def nightly(cfg: Config, ntree: Ntree, slack: Slack) -> str:
-    """ntree doctor + report. Returns a human summary (also sent to Slack by caller)."""
+def prune_stale(cfg: Config, ledger: Ledger, ntree: Ntree) -> list[str]:
+    """Tear down workspaces of tasks blocked longer than BLOCKED_RETENTION_DAYS.
+
+    Blocked tasks keep their worktree for debugging; without this they would hold a
+    worktree, ports and a database forever. Returns the slugs removed.
+    """
+    removed: list[str] = []
+    for row in ledger.stale_blocked(cfg.blocked_retention_days):
+        slug = row["slug"]
+        _safe("ntree rm", slug, lambda slug=slug: ntree.rm(slug))
+        _safe("dropdb", slug, lambda slug=slug: _dropdb(cfg, slug))
+        _safe("branch -D", slug, lambda slug=slug: ntree.remove_branch(slug))
+        ledger.update(row["task_id"], pruned=1)
+        removed.append(slug)
+    return removed
+
+
+def nightly(cfg: Config, ntree: Ntree, slack: Slack, ledger: Ledger | None = None) -> str:
+    """ntree doctor + prune + report. Returns a human summary (also sent to Slack by caller)."""
     lines: list[str] = []
+    swept = ntree.clear_stale_git_locks()
+    if swept:
+        lines.append(f"removed {len(swept)} stale git lock(s)")
+    if ledger is not None:
+        pruned = prune_stale(cfg, ledger, ntree)
+        lines.append(f"pruned {len(pruned)} stale blocked workspace(s)"
+                     + (f": {', '.join(pruned)}" if pruned else ""))
     doc = ntree.doctor()
     lines.append("ntree doctor: " + ("ok" if doc.returncode == 0 else "issues"))
     if doc.stdout.strip():

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -21,7 +24,7 @@ def launch(
     settings_file: str,
     session_log: Path,
     max_turns: int,
-    wall_clock_limit_min: int,
+    wall_clock_limit_min: float,
     model: str = "",
     permission_mode: str = "acceptEdits",
     read_only: bool = False,
@@ -30,13 +33,16 @@ def launch(
 ) -> tuple[SessionResult, int]:
     """Run `claude -p` in `worktree`, tee the stream to `session_log`, and parse it.
 
-    Returns (SessionResult, returncode). A wall-clock timeout kills the process group
-    and is reported as returncode 124 (like `timeout`).
+    The prompt goes in on stdin (not argv): it avoids the 128 KiB single-argument limit
+    on Linux and keeps task text / diffs out of `ps` output.
+
+    The wall-clock limit is enforced by a watchdog timer, so it fires even if the
+    session goes completely silent. A timeout kills the process group and is reported
+    as returncode 124 (like `timeout`).
     """
     cmd = [
         "claude",
         "-p",
-        prompt,
         "--output-format",
         "stream-json",
         "--verbose",
@@ -53,17 +59,18 @@ def launch(
         cmd += ["--resume", resume_session]
 
     session_log.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + wall_clock_limit_min * 60
     result = SessionResult()
 
     log.info("launch worker in %s (max_turns=%s, wall=%smin%s)",
              worktree.name, max_turns, wall_clock_limit_min,
              ", read-only" if read_only else "")
 
-    with open(session_log, "w") as logf:
+    timed_out = threading.Event()
+    with open(session_log, "a") as logf:
         proc = subprocess.Popen(
             cmd,
             cwd=worktree,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -71,10 +78,24 @@ def launch(
             start_new_session=True,  # own process group, so we can kill children too
             env=clean_env(),
         )
-        if on_pid:
-            on_pid(proc.pid)
-        assert proc.stdout is not None
+
+        def _expire() -> None:
+            log.warning("wall-clock limit hit; killing worker %s", worktree.name)
+            timed_out.set()
+            kill_group(proc.pid, proc=proc)
+
+        timer = threading.Timer(wall_clock_limit_min * 60, _expire)
+        timer.daemon = True
+        timer.start()
         try:
+            if on_pid:
+                on_pid(proc.pid)
+            assert proc.stdin is not None and proc.stdout is not None
+            try:
+                proc.stdin.write(prompt)
+                proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass  # process died before reading; the stream/returncode will say why
             for line in proc.stdout:
                 logf.write(line)
                 logf.flush()
@@ -87,23 +108,36 @@ def launch(
                     continue
                 if isinstance(ev, dict):
                     parse_event(ev, result)
-                if time.monotonic() > deadline:
-                    log.warning("wall-clock limit hit; killing worker %s", worktree.name)
-                    _kill(proc)
-                    proc.wait(timeout=30)
-                    return result, 124
         finally:
+            timer.cancel()
             rc = proc.wait()
-    return result, rc
+    return result, (124 if timed_out.is_set() else rc)
 
 
-def _kill(proc: subprocess.Popen) -> None:
-    import os
-    import signal
+def kill_group(pid: int, grace: float = 15.0, proc: subprocess.Popen | None = None) -> None:
+    """Stop a process group gracefully: SIGTERM, wait up to `grace`s, SIGKILL stragglers.
 
+    The wait matters: git removes its lock files when it receives SIGTERM, but a SIGKILL
+    leaves .git/config.lock (and friends) behind, which then breaks every later
+    `git worktree add` / `git config` in the repo. Pass `proc` when the leader is our own
+    child so it is reaped (a zombie leader would keep the group looking alive).
+    """
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        time.sleep(2)
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except ProcessLookupError:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if proc is not None:
+            proc.poll()
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            return  # whole group exited on SIGTERM — nothing left to leave a lock behind
+        time.sleep(0.1)
+    log.warning("process group %s ignored SIGTERM for %.0fs; sending SIGKILL", pgid, grace)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
         pass

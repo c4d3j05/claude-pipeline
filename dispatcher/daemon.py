@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as cfgmod
 from . import pr as prmod
 from .cleanup import process_closed_prs
 from .config import Config
-from .db import Ledger
+from .db import ACTIVE_STATES, Ledger
 from .log import get
 from .notify import Slack
 from .ntree import Ntree, NtreeError
@@ -25,14 +28,23 @@ from .prompt import (
     worker_prompt,
 )
 from .review import adversarial_review, run_tests, working_tree_dirty
-from .stream import blocked_reason
+from .stream import SessionResult, blocked_reason
 from .vikunja import Vikunja
-from .worker import launch
+from .worker import kill_group, launch
 
 log = get("daemon")
 
 CLEANUP_INTERVAL = 300  # poll open PRs every 5 min
 
+
+@dataclass
+class _Run:
+    """Mutable per-task state threaded through the gate helpers."""
+    result: SessionResult
+    session_id: str
+
+
+Stop = tuple[str, str]  # ("cancel" | "block", reason)
 
 POOL_CEILING = 32  # hard cap on threads; live concurrency is gated by cfg.max_workers
 
@@ -87,7 +99,9 @@ class Dispatcher:
 
     # --- main loop -------------------------------------------------------
     def run(self) -> None:
+        self._lock_fh = _acquire_instance_lock(self.cfg.db_path.with_suffix(".lock"))
         self.refresh_board()
+        self.ntree.clear_stale_git_locks()   # leftovers from a previous crash/kill
         self.reap_orphans()
         log.info(
             "dispatcher up: project=%s view=%s max_workers=%s repo=%s",
@@ -103,7 +117,8 @@ class Dispatcher:
                 log.exception("tick failed")
             self._stop.wait(self.cfg.poll_interval)
 
-        log.info("shutting down; waiting for workers…")
+        log.info("shutting down; waiting for %d running task(s) to finish…",
+                 self.ledger.active_count())
         self.pool.shutdown(wait=True)
         self.ledger.close()
 
@@ -121,10 +136,10 @@ class Dispatcher:
     def _honor_cancels(self) -> None:
         for row in self.ledger.pending_cancels():
             pid = row["pid"]
-            if pid and _pid_alive(pid) and pid != os.getpid():
+            if pid and _is_claude_proc(pid):
                 log.warning("cancel requested for task %s — killing worker pid %s",
                             row["task_id"], pid)
-                _kill_pgid(pid)
+                kill_group(pid)
             # run_pipeline will see cancel_requested after the worker dies and finalize.
 
     def tick(self) -> None:
@@ -155,7 +170,10 @@ class Dispatcher:
             return
 
         for task in self.ready_tasks(limit=free):
-            self.claim_and_dispatch(task)
+            try:
+                self.claim_and_dispatch(task)
+            except Exception:
+                log.exception("could not claim task %s", task.get("id"))
 
     def ready_tasks(self, limit: int) -> list[dict]:
         """Tasks in the ready bucket carrying the claude label, not already claimed."""
@@ -174,10 +192,14 @@ class Dispatcher:
                 continue
             if self.cfg.claude_label.lower() not in self.vk.task_labels(t):
                 continue
-            if self.ledger.is_tracked_active(t["id"]):
-                continue
-            if self.vk.has_comment_prefix(t["id"], "dispatched:"):
-                continue
+            row = self.ledger.get(t["id"])
+            if row is not None:
+                # In flight, PR open, or finished: never re-claim. A *blocked* row sitting
+                # in Ready means a human re-queued it — that is a deliberate retry.
+                if row["state"] in (*ACTIVE_STATES, "pr_open", "done"):
+                    continue
+            elif self.vk.has_comment_prefix(t["id"], "dispatched:"):
+                continue  # claimed by a run whose ledger row is gone; don't double-claim
             out.append(t)
         return out
 
@@ -208,6 +230,26 @@ class Dispatcher:
         self.ledger.update(tid, session_id=result.session_id or None)
         self.ledger.add_cost(tid, result.cost_usd)
 
+    def _launch(self, tid, worktree, slug, prompt, logname, resume_session=""):
+        """Run one worker session, account its cost, and always clear the stored PID."""
+        try:
+            result, rc = launch(
+                worktree=worktree,
+                prompt=prompt,
+                settings_file=self.cfg.settings_file,
+                session_log=self._session_log(slug, logname),
+                max_turns=self.cfg.max_turns,
+                wall_clock_limit_min=self.cfg.wall_clock_limit_min,
+                model=self.cfg.worker_model,
+                permission_mode=self.cfg.permission_mode,
+                resume_session=resume_session,
+                on_pid=lambda p: self.ledger.update(tid, pid=p),
+            )
+        finally:
+            self.ledger.update(tid, pid=None)  # a stale PID could be reused by another process
+        self._account_cost(tid, result)
+        return result, rc
+
     def _cap_hit(self, result, rc: int) -> str | None:
         if rc == 124:
             return f"cap: wall-clock {self.cfg.wall_clock_limit_min}m"
@@ -215,7 +257,77 @@ class Dispatcher:
             return f"cap: turns={self.cfg.max_turns}"
         if len(result.permission_denials) >= 3:
             return f"permission denials (x{len(result.permission_denials)}): {result.permission_denials[-1]}"
+        if rc != 0 or result.is_error:
+            # Auth expired, API overloaded, crash… Don't feed a dead session to the gates.
+            detail = (result.result_text or result.last_message or "no output").strip()
+            return f"worker error (rc={rc}): {detail[:200]}"
         return None
+
+    def _over_task_budget(self, tid: int) -> str | None:
+        cap = self.cfg.task_cap_usd
+        row = self.ledger.get(tid)
+        if cap and row and row["cost_usd"] >= cap:
+            return f"cap: task cost ${row['cost_usd']:.2f} >= ${cap:.2f}"
+        return None
+
+    def _stop_reason(self, tid: int, result, rc: int) -> Stop | None:
+        """Why the task must stop after a worker session, or None to carry on."""
+        if self.ledger.cancel_requested(tid):
+            return ("cancel", "")
+        reason = blocked_reason(result)
+        if reason:
+            return ("block", reason)
+        cap = self._cap_hit(result, rc) or self._over_task_budget(tid)
+        return ("block", cap) if cap else None
+
+    def _halt(self, tid: int, slug: str, stop: Stop) -> None:
+        kind, reason = stop
+        if kind == "cancel":
+            return self._cancelled(tid, slug)
+        return self._block(tid, reason)
+
+    def _resume_step(self, tid, worktree, slug, run: _Run, prompt: str) -> Stop | None:
+        result, rc = self._launch(tid, worktree, slug, prompt, "session.jsonl", run.session_id)
+        run.result = result
+        run.session_id = result.session_id or run.session_id  # resume may fork a new id
+        return self._stop_reason(tid, result, rc)
+
+    def _verify(self, tid, worktree, slug, run: _Run) -> Stop | None:
+        """GATE 1: tests green AND working tree clean, re-checked after every worker turn.
+
+        Pushing only sends commits, so a green run on a dirty tree proves nothing about
+        what the PR will contain; a discard can likewise invalidate an earlier green.
+        """
+        cfg = self.cfg
+        self.ledger.update(tid, state="testing")
+        settled = False
+        while True:
+            green, tail = run_tests(cfg, self.ntree, slug)
+            while not green:
+                row = self.ledger.get(tid)
+                if row["test_retries"] >= cfg.max_test_retries:
+                    return ("block", "gate: tests red")
+                n = row["test_retries"] + 1
+                self.ledger.update(tid, test_retries=n)
+                self.comment(tid, f"gate: tests red, retry {n}/{cfg.max_test_retries}")
+                stop = self._resume_step(tid, worktree, slug, run, retry_prompt_tests(tail))
+                if stop:
+                    return stop
+                green, tail = run_tests(cfg, self.ntree, slug)
+            if not working_tree_dirty(worktree):
+                return None
+            if settled:
+                return ("block", "gate: uncommitted changes after commit-or-discard turn")
+            settled = True
+            stop = self._resume_step(tid, worktree, slug, run, commit_or_discard_prompt())
+            if stop:
+                return stop
+
+    def _review(self, tid, worktree, slug, spec: str, base_ref: str) -> dict:
+        review = adversarial_review(
+            self.cfg, worktree, spec, self._session_log(slug, "review.jsonl"), base_ref)
+        self.ledger.add_cost(tid, review.get("cost_usd", 0.0))  # review spend counts too
+        return review
 
     def run_pipeline(self, task: dict, slug: str) -> None:
         tid = task["id"]
@@ -226,97 +338,64 @@ class Dispatcher:
         # Workspace: start pristine. A leftover worktree AND its branch from a
         # prior/blocked run would otherwise be reused stale (ntree new is a no-op
         # if the workspace exists, and reuses the old branch off a stale base).
+        base_ref = self.ntree.base_ref()   # fetched, so workers never fork from a stale main
         self.ntree.rm(slug)
         self.ntree.remove_branch(slug)
-        worktree = self.ntree.new(slug)
-        self.ledger.update(tid, state="working", workspace=slug, pid=os.getpid())
+        worktree = self.ntree.new(slug, base_ref)
+        self.ledger.update(tid, state="working", workspace=slug)
 
         # First worker attempt
-        prompt = worker_prompt(tid, title, desc, slug)
-        result, rc = launch(
-            worktree=worktree,
-            prompt=prompt,
-            settings_file=cfg.settings_file,
-            session_log=self._session_log(slug, "session.jsonl"),
-            max_turns=cfg.max_turns,
-            wall_clock_limit_min=cfg.wall_clock_limit_min,
-            model=cfg.worker_model,
-            permission_mode=cfg.permission_mode,
-            on_pid=lambda p: self.ledger.update(tid, pid=p),
-        )
-        self._account_cost(tid, result)
+        result, rc = self._launch(tid, worktree, slug, worker_prompt(tid, title, desc, slug),
+                                  "session.jsonl")
         self.comment(tid, f"dispatched: session={result.session_id} pid={os.getpid()} workspace={slug}")
-        session_id = result.session_id
+        run = _Run(result=result, session_id=result.session_id)
+        stop = self._stop_reason(tid, result, rc)
+        if stop:
+            return self._halt(tid, slug, stop)
 
-        if self.ledger.cancel_requested(tid):
-            return self._cancelled(tid, slug)
-        reason = blocked_reason(result)
-        if reason:
-            return self._block(tid, reason)
-        cap = self._cap_hit(result, rc)
-        if cap:
-            return self._block(tid, cap)
-
-        # GATE 1: tests (the dispatcher runs them; it does not trust the worker)
-        self.ledger.update(tid, state="testing")
-        green, tail = run_tests(cfg, self.ntree, slug)
-        while not green:
-            row = self.ledger.get(tid)
-            if row["test_retries"] >= cfg.max_test_retries:
-                return self._block(tid, "gate: tests red")
-            n = row["test_retries"] + 1
-            self.ledger.update(tid, test_retries=n)
-            self.comment(tid, f"gate: tests red, retry {n}/{cfg.max_test_retries}")
-            result, rc = self._resume(tid, worktree, slug, session_id, retry_prompt_tests(tail), "session.jsonl")
-            self._account_cost(tid, result)
-            if self.ledger.cancel_requested(tid):
-                return self._cancelled(tid, slug)
-            cap = self._cap_hit(result, rc)
-            if cap:
-                return self._block(tid, cap)
-            green, tail = run_tests(cfg, self.ntree, slug)
-
-        # Working-tree check: uncommitted changes -> one more turn.
-        if working_tree_dirty(worktree):
-            result, rc = self._resume(tid, worktree, slug, session_id, commit_or_discard_prompt(), "session.jsonl")
-            self._account_cost(tid, result)
-            if working_tree_dirty(worktree):
-                return self._block(tid, "gate: uncommitted changes after commit-or-discard turn")
+        # GATE 1: tests + clean tree (the dispatcher runs them; it does not trust the worker)
+        stop = self._verify(tid, worktree, slug, run)
+        if stop:
+            return self._halt(tid, slug, stop)
 
         # GATE 2: adversarial review
-        self.ledger.update(tid, state="reviewing")
         spec = f"{title}\n\n{desc}"
-        review = adversarial_review(cfg, worktree, spec, self._session_log(slug, "review.jsonl"))
-        while review.get("verdict") == "block":
+        self.ledger.update(tid, state="reviewing")
+        review = self._review(tid, worktree, slug, spec, base_ref)
+        while True:
+            if review.get("error"):  # the reviewer itself failed — not the worker's fault
+                return self._block(tid, "review error: reviewer session failed")
+            over = self._over_task_budget(tid)
+            if over:
+                return self._block(tid, over)
+            if review.get("verdict") != "block":
+                break
             row = self.ledger.get(tid)
             if row["review_retries"] >= cfg.max_review_retries:
-                findings = _fmt_findings(review.get("findings", []))
-                self.comment(tid, f"gate: review blocking\n{findings}")
+                self.comment(tid, f"gate: review blocking\n{_fmt_findings(review.get('findings', []))}")
                 return self._block(tid, "gate: review blocking")
             n = row["review_retries"] + 1
             self.ledger.update(tid, review_retries=n)
             self.comment(tid, "gate: review blocking, retry")
-            result, rc = self._resume(
-                tid, worktree, slug, session_id, retry_prompt_review(review.get("findings", [])), "session.jsonl"
-            )
-            self._account_cost(tid, result)
-            if self.ledger.cancel_requested(tid):
-                return self._cancelled(tid, slug)
-            cap = self._cap_hit(result, rc)
-            if cap:
-                return self._block(tid, cap)
-            green, tail = run_tests(cfg, self.ntree, slug)
-            if not green:
-                return self._block(tid, "gate: tests red after review retry")
-            review = adversarial_review(cfg, worktree, spec, self._session_log(slug, "review.jsonl"))
+            stop = self._resume_step(
+                tid, worktree, slug, run, retry_prompt_review(review.get("findings", [])))
+            if not stop:
+                stop = self._verify(tid, worktree, slug, run)  # tests + clean tree again
+            if stop:
+                return self._halt(tid, slug, stop)
+            self.ledger.update(tid, state="reviewing")
+            review = self._review(tid, worktree, slug, spec, base_ref)
+
+        if self.ledger.cancel_requested(tid):  # cancelled while the review was running
+            return self._cancelled(tid, slug)
 
         # PASS -> open the PR
         row = self.ledger.get(tid)
         needs_qa = "manual qa" in desc.lower()
         body = prmod.build_body(
             cfg=cfg, task_id=tid, task_title=title, description_html=desc,
-            worker_summary=result.result_text or result.last_message,
-            review=review, session_id=session_id, cost_usd=row["cost_usd"],
+            worker_summary=run.result.result_text or run.result.last_message,
+            review=review, session_id=run.session_id, cost_usd=row["cost_usd"],
         )
         pr_url = prmod.push_and_create(
             cfg=cfg, worktree=worktree, branch=slug,
@@ -327,20 +406,6 @@ class Dispatcher:
         self.ledger.update(tid, state="pr_open", pr_url=pr_url)
         self.slack.pr_opened(tid, pr_url)
         log.info("task %s -> PR %s", tid, pr_url)
-
-    def _resume(self, tid, worktree, slug, session_id, prompt, logname):
-        return launch(
-            worktree=worktree,
-            prompt=prompt,
-            settings_file=self.cfg.settings_file,
-            session_log=self._session_log(slug, logname),
-            max_turns=self.cfg.max_turns,
-            wall_clock_limit_min=self.cfg.wall_clock_limit_min,
-            model=self.cfg.worker_model,
-            permission_mode=self.cfg.permission_mode,
-            resume_session=session_id,
-            on_pid=lambda p: self.ledger.update(tid, pid=p),
-        )
 
     def _cancelled(self, task_id: int, slug: str) -> None:
         log.warning("task %s cancelled by operator", task_id)
@@ -367,18 +432,20 @@ class Dispatcher:
 
     # --- restart recovery ------------------------------------------------
     def reap_orphans(self) -> None:
-        """A dispatcher restart reaps orphaned workers by PID (spec)."""
+        """A dispatcher restart reaps workers it no longer owns and unsticks their cards."""
         for row in self.ledger.active():
-            pid = row["pid"]
-            if pid and _pid_alive(pid) and pid != os.getpid():
-                log.info("reaping orphan pid %s from task %s", pid, row["task_id"])
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            # Re-queue: mark blocked so a human/next run re-triages (queue truth is Vikunja).
-            self.ledger.update(row["task_id"], state="blocked")
-            self.comment(row["task_id"], "dispatcher restarted; worker interrupted — re-triage")
+            tid, pid = row["task_id"], row["pid"]
+            # Verify it's still a claude process: a recycled PID must never be killed.
+            if pid and _is_claude_proc(pid):
+                log.info("reaping orphan pid %s from task %s", pid, tid)
+                kill_group(pid)
+            self.ledger.update(tid, state="blocked", pid=None)
+            try:
+                self.move(tid, "blocked")  # otherwise the card sits in In Progress forever
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not move interrupted task %s to blocked: %s", tid, e)
+            self.comment(tid, "blocked: dispatcher restarted; worker interrupted — "
+                              "move this card back to Ready to retry")
 
 
 def _fmt_findings(findings: list[dict]) -> str:
@@ -395,22 +462,23 @@ def _safe_call(fn) -> None:
         log.warning("teardown step failed: %s", e)
 
 
-def _kill_pgid(pid: int) -> None:
+def _acquire_instance_lock(path: Path):
+    """Exclusive lock so two dispatchers can't double-claim the same board."""
+    fh = open(path, "w")  # noqa: SIM115 — must stay open for the process lifetime
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
-        time.sleep(2)
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists, owned by someone else
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        raise SystemExit(f"another dispatcher already holds {path}; refusing to start") from None
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
+
+
+def _is_claude_proc(pid: int) -> bool:
+    """True only if `pid` is alive AND is a claude process (guards against PID reuse)."""
+    try:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "args="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
         return False
-    return True
+    return "claude" in out
