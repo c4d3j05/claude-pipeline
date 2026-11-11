@@ -275,9 +275,21 @@ class Dispatcher:
     def _session_log(self, slug: str, name: str) -> Path:
         return self.logs_root / slug / name
 
-    def _account_cost(self, tid: int, result) -> None:
-        self.ledger.update(tid, session_id=result.session_id or None)
-        self.ledger.add_cost(tid, result.cost_usd)
+    def _account_cost(self, tid: int, result, resumed: bool = False) -> None:
+        """Add this session's NEW spend to the ledger.
+
+        `total_cost_usd` is cumulative over a resumed conversation (verified: the resumed
+        result's modelUsage equals the earlier session's plus this invocation's), so adding
+        it as-is double counts every resume (test retries, review retries, continuations).
+        `session_cum` remembers the cumulative figure already accounted.
+        """
+        row = self.ledger.get(tid)
+        prev = (row["session_cum"] if row else 0.0) if resumed else 0.0
+        cum = result.cost_usd or 0.0
+        delta = cum - prev if cum >= prev else cum   # cum < prev: the counter restarted
+        self.ledger.update(tid, session_id=result.session_id or None,
+                           session_cum=max(cum, prev) if resumed else cum)
+        self.ledger.add_cost(tid, delta)
 
     def _launch(self, tid, worktree, slug, prompt, logname, resume_session=""):
         """Run one worker session, account its cost, always clear the stored PID.
@@ -303,7 +315,7 @@ class Dispatcher:
                 )
             finally:
                 self.ledger.update(tid, pid=None)  # a stale PID could be reused later
-            self._account_cost(tid, result)
+            self._account_cost(tid, result, resumed=bool(resume_session))
             if attempt + 1 >= attempts or not self._is_transient(result, rc):
                 break
             if self.ledger.cancel_requested(tid):
