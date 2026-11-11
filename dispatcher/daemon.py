@@ -42,7 +42,7 @@ from .review import (
     working_tree_dirty,
 )
 from .stream import SessionResult, blocked_reason, parse_lines
-from .vikunja import Vikunja
+from .vikunja import Vikunja, open_blockers
 from .worker import launch
 
 log = get("daemon")
@@ -95,6 +95,7 @@ class Dispatcher:
         self.buckets: dict[str, dict] = {}
         self._stop = threading.Event()
         self._last_cleanup = 0.0
+        self._waiting_logged: dict[int, list[int]] = {}   # task -> blockers last logged
         self._label_id = 0
         self._gate_sem = threading.BoundedSemaphore(cfg.max_gates)
         self._baseline_lock = threading.Lock()
@@ -255,6 +256,16 @@ class Dispatcher:
                 continue
             if self.cfg.claude_label.lower() not in self.vk.task_labels(t):
                 continue
+            waiting = open_blockers(t)
+            if waiting:
+                # A `blocked` relation to a task that is not done: leave it in Ready. It is looked
+                # at again on every poll, so it starts on the first poll after its last blocker is
+                # marked done.
+                if self._waiting_logged.get(t["id"]) != waiting:
+                    self._waiting_logged[t["id"]] = waiting
+                    log.info("task %s waits for %s (not done); not claiming", t["id"], waiting)
+                continue
+            self._waiting_logged.pop(t["id"], None)
             row = self.ledger.get(t["id"])
             if row is not None:
                 # In flight, PR open, or finished: never re-claim. A *blocked* row sitting
