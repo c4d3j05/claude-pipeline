@@ -897,3 +897,42 @@ def test_retry_keeps_lifetime_cost(tmp_path):
     led.add_cost(1, 1.0)
     row = led.get(1)
     assert row["cost_usd"] == pytest.approx(1.0) and row["lifetime_cost"] == pytest.approx(3.0)
+
+
+# --- PR listing must survive a token that cannot read CI status ---------------------------------------
+def _fake_gh(tmp_path, monkeypatch, checks_allowed):
+    import os
+
+    from dispatcher import pr as prmod
+
+    b = tmp_path / "bin"; b.mkdir(exist_ok=True)
+    rows = ('[{"number":3,"state":"OPEN","headRefName":"task-3-x","url":"u3","mergeable":"CONFLICTING"},'
+            '{"number":2,"state":"CLOSED","headRefName":"task-2-x","url":"u2"}]')
+    checks = '[{"number":3,"statusCheckRollup":[{"name":"ci","conclusion":"FAILURE"}]}]'
+    if checks_allowed:
+        on_checks = f"echo '{checks}'"
+    else:
+        on_checks = 'echo "GraphQL: Resource not accessible by personal access token" >&2; exit 1'
+    _script(b / "gh", f"""#!/bin/sh
+case "$*" in
+  *statusCheckRollup*) {on_checks} ;;
+  *) echo '{rows}' ;;
+esac
+""")
+    monkeypatch.setenv("PATH", f"{b}:{os.environ['PATH']}")
+    monkeypatch.setattr(prmod, "_checks_unavailable", False)
+    return prmod
+
+
+def test_pr_listing_survives_a_token_that_cannot_read_ci(tmp_path, monkeypatch):
+    prmod = _fake_gh(tmp_path, monkeypatch, checks_allowed=False)
+    rows = prmod.open_worker_prs(_cfg(tmp_path))
+    assert [r["number"] for r in rows] == [3, 2]            # cleanup still sees every PR
+    assert cleanup.pr_problem(rows[0]) == "merge conflicts with the base branch"
+    assert prmod._checks_unavailable is True                # remembered; not retried every poll
+
+
+def test_pr_listing_adds_ci_status_when_the_token_allows_it(tmp_path, monkeypatch):
+    prmod = _fake_gh(tmp_path, monkeypatch, checks_allowed=True)
+    rows = prmod.open_worker_prs(_cfg(tmp_path))
+    assert "failing checks: ci" in cleanup.pr_problem(rows[0])
