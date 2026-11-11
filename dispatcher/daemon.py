@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import config as cfgmod
 from . import pr as prmod
-from .cleanup import process_closed_prs, watch_open_prs
+from .cleanup import process_closed_prs, sync_deleted_tasks, watch_open_prs
 from .config import Config
 from .db import ACTIVE_STATES, Ledger
 from .log import get
@@ -126,6 +126,10 @@ class Dispatcher:
         self.refresh_board()
         self.ntree.clear_stale_git_locks()   # leftovers from a previous crash/kill
         self.reap_orphans()
+        try:  # tickets deleted while the dispatcher was down
+            sync_deleted_tasks(self.cfg, self.ledger, self.ntree, self.vk, self.logs_root)
+        except Exception:
+            log.exception("startup sync of deleted tickets failed")
         log.info(
             "dispatcher up: project=%s view=%s max_workers=%s repo=%s",
             self.cfg.project_id, self.view_id, self.cfg.max_workers, self.cfg.repo_path,

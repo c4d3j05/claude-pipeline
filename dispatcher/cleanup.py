@@ -184,8 +184,38 @@ def prune_stale(cfg: Config, ledger: Ledger, ntree: Ntree) -> list[str]:
     return removed
 
 
+def sync_deleted_tasks(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja,
+                       logs_root: Path | None = None) -> list[int]:
+    """Forget tasks whose Vikunja ticket was deleted (or trashed).
+
+    The ledger is only a mirror of the board, so a deleted ticket leaves a blocked/done row
+    that nothing will ever advance, plus its workspace, branch and logs. Remove all of it.
+
+    Only finished rows (blocked/done) are considered: a running task, or one with an open
+    PR, is never touched. Only a definite 404 counts as deleted; an unreachable Vikunja
+    leaves everything alone.
+    """
+    logs_root = logs_root or Path("logs")
+    removed: list[int] = []
+    for row in ledger.all_tasks():
+        if row["state"] not in ("blocked", "done"):
+            continue
+        if vikunja.task_exists(row["task_id"]) is not False:
+            continue
+        slug, tid = row["slug"], row["task_id"]
+        log.info("task %s: ticket was deleted in Vikunja — removing its row, workspace, branch "
+                 "and logs", tid)
+        _safe("ntree rm", slug, lambda slug=slug: ntree.rm(slug))
+        _safe("dropdb", slug, lambda slug=slug: _dropdb(cfg, slug))
+        _safe("branch -D", slug, lambda slug=slug: ntree.remove_branch(slug))
+        shutil.rmtree(logs_root / slug, ignore_errors=True)
+        ledger.delete_task(tid)
+        removed.append(tid)
+    return removed
+
+
 def nightly(cfg: Config, ntree: Ntree, slack: Slack, ledger: Ledger | None = None,
-            logs_root: Path | None = None) -> str:
+            logs_root: Path | None = None, vikunja=None) -> str:
     """ntree doctor + prune + report. Returns a human summary (also sent to Slack by caller)."""
     lines: list[str] = []
     swept = ntree.clear_stale_git_locks()
@@ -195,6 +225,10 @@ def nightly(cfg: Config, ntree: Ntree, slack: Slack, ledger: Ledger | None = Non
         pruned = prune_stale(cfg, ledger, ntree)
         lines.append(f"pruned {len(pruned)} stale blocked workspace(s)"
                      + (f": {', '.join(pruned)}" if pruned else ""))
+        if vikunja is not None:
+            gone = sync_deleted_tasks(cfg, ledger, ntree, vikunja, logs_root)
+            lines.append(f"removed {len(gone)} task(s) whose ticket was deleted"
+                         + (f": {', '.join(f'#{t}' for t in gone)}" if gone else ""))
         n = prune_logs(cfg, ledger, logs_root or Path("logs"))
         lines.append(f"pruned {n} old task log folder(s)")
     doc = ntree.doctor()
