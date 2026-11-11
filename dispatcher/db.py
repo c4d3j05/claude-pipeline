@@ -78,6 +78,8 @@ class Ledger:
         bcols = {r[1] for r in self.conn.execute("PRAGMA table_info(baseline)")}
         if bcols and "boot_id" not in bcols:
             self.conn.execute("ALTER TABLE baseline ADD COLUMN boot_id TEXT")
+        if "tested_sha" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN tested_sha TEXT")
         if "session_cum" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN session_cum REAL NOT NULL DEFAULT 0")
         if "resumable" not in cols:

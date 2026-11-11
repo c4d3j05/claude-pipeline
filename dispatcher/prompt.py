@@ -148,3 +148,14 @@ FRESH_SESSION_NOTE = (
     "\n\nNOTE: a previous attempt at this task already made changes in this workspace "
     "(see `git status` and `git diff`). Build on them; do not start over."
 )
+
+
+def verdict_now_prompt() -> str:
+    """Sent to a reviewer that ran out of turns (or answered in prose) without a verdict."""
+    return (
+        "You are out of turns. Do not investigate further. Based on everything you have "
+        "already read, output ONLY the JSON verdict now, nothing else: "
+        '{"verdict": "pass"|"block", "findings": [{"severity": "...", "file": "...", '
+        '"line": 0, "note": "..."}]}. Block only on correctness, security, or a missed '
+        "acceptance criterion; list any concern you did not finish checking as a finding."
+    )

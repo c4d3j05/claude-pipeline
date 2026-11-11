@@ -12,7 +12,7 @@ from .log import get
 from .ntree import Ntree
 from .proc import TIMEOUT_RC
 from .procenv import clean_env
-from .prompt import review_prompt
+from .prompt import review_prompt, verdict_now_prompt
 from .worker import launch
 
 log = get("review")
@@ -30,6 +30,18 @@ def run_tests(cfg: Config, ntree: Ntree, slug: str) -> tuple[bool, str]:
     output = (cp.stdout or "") + (cp.stderr or "")
     tail = "\n".join(output.splitlines()[-40:])
     return cp.returncode == 0, tail
+
+
+def head_sha(worktree: Path) -> str:
+    cp = subprocess.run(["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True,
+                        timeout=30, env=clean_env("plain"))
+    return cp.stdout.strip() if cp.returncode == 0 else ""
+
+
+def review_turns(diff_chars: int, cap: int) -> int:
+    """Turn budget for the reviewer: it verifies claims by reading code, so a large diff
+    needs more turns (10 + 1 per 10k chars), up to `cap`. A fixed 8 ran out on a 28-file diff."""
+    return max(4, min(cap, 10 + diff_chars // 10_000))
 
 
 def working_tree_dirty(worktree: Path) -> bool:
@@ -108,19 +120,35 @@ def adversarial_review(
     shown = diff[:MAX_DIFF_CHARS]
     if truncated:
         shown += f"\n... [diff truncated: showing {MAX_DIFF_CHARS} of {len(diff)} chars]"
-    result, rc = launch(
-        worktree=worktree,
-        prompt=review_prompt(spec, shown),
-        settings_file=review_settings(cfg, worktree, session_log),
-        session_log=session_log,
-        max_turns=8,
-        wall_clock_limit_min=15,
-        model=cfg.review_model,
-        permission_mode="plan",  # read-only
-        read_only=True,
-    )
+    turns = review_turns(len(shown), cfg.review_max_turns)
+
+    def run(prompt, max_turns, wall, resume=""):
+        return launch(
+            worktree=worktree,
+            prompt=prompt,
+            settings_file=review_settings(cfg, worktree, session_log),
+            session_log=session_log,
+            max_turns=max_turns,
+            wall_clock_limit_min=wall,
+            model=cfg.review_model,
+            permission_mode="plan",  # read-only
+            read_only=True,
+            resume_session=resume,
+        )
+
+    result, rc = run(review_prompt(spec, shown), turns, 15)
     cost = result.cost_usd
     verdict = _extract_json(result.result_text or result.last_message)
+    if verdict is None and result.session_id:
+        # Out of turns (or answered in prose) without a verdict. The reviewer has already done
+        # the reading, so one cheap final request for the JSON beats failing the whole task.
+        log.warning("reviewer gave no verdict (rc=%s, %s turns of %s); asking for it once",
+                    rc, result.num_turns, turns)
+        result2, rc2 = run(verdict_now_prompt(), 3, 5, resume=result.session_id)
+        # A resumed session reports a running total; a fresh counter would be a new spend.
+        cost = result2.cost_usd if result2.cost_usd >= cost else cost + result2.cost_usd
+        verdict = _extract_json(result2.result_text or result2.last_message)
+        result, rc = result2, rc2
     if verdict is None:
         failed = rc != 0 or result.is_error
         log.warning("review produced no parseable JSON (rc=%s); treating as block", rc)
