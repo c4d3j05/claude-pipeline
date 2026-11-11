@@ -13,3 +13,6 @@ dist/
 
 # runtime worker session logs
 logs/
+
+# runtime single-instance lock (holds the dispatcher PID)
+pipeline.lock
