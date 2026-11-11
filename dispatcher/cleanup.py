@@ -103,7 +103,7 @@ def watch_open_prs(cfg: Config, ledger: Ledger, vikunja, slack: Slack) -> None:
         except Exception as e:  # noqa: BLE001
             log.warning("could not comment on task %s: %s", task_id, e)
         if problem:
-            slack.alert(f"task {task_id}: {text} {pr.get('url')}")
+            slack.pr_needs_attention(task_id, problem, pr.get("url") or "")
 
 
 def prune_logs(cfg: Config, ledger: Ledger, logs_root: Path) -> int:

@@ -94,6 +94,10 @@ class Ledger:
             self.conn.execute(
                 "ALTER TABLE tasks ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
             )
+        if "slack_channel" not in cols:      # the planner thread to post this task's events in
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN slack_channel TEXT")
+        if "slack_thread" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN slack_thread TEXT")
 
     # --- tasks -----------------------------------------------------------
     def upsert_claim(self, task_id: int, slug: str, branch: str) -> None:
@@ -122,6 +126,13 @@ class Ledger:
                 f"UPDATE tasks SET {cols} WHERE task_id=?", (*fields.values(), task_id)
             )
             self.conn.commit()
+
+    def thread(self, task_id: int):
+        """(channel, thread_ts) of the Slack thread this task reports into, or None."""
+        row = self.get(task_id)
+        if row is None or not row["slack_channel"] or not row["slack_thread"]:
+            return None
+        return row["slack_channel"], row["slack_thread"]
 
     def get(self, task_id: int) -> sqlite3.Row | None:
         with self._lock:

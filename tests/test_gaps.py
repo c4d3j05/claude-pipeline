@@ -762,7 +762,7 @@ def test_pr_watch_notifies_once_per_change(tmp_path, monkeypatch):
     _pr_open_row(led)
     pr = {"state": "OPEN", "headRefName": "task-7-x", "url": "https://gh/pr/2", "mergeable": "CONFLICTING"}
     alerts, vk = [], _VKStub()
-    slack = type("S", (), {"alert": lambda self, t: alerts.append(t)})()
+    slack = type("S", (), {"pr_needs_attention": lambda self, tid, problem, url: alerts.append((tid, problem, url))})()
     monkeypatch.setattr(cleanup, "open_worker_prs", lambda cfg: [pr])
     cleanup.watch_open_prs(_cfg(tmp_path), led, vk, slack)
     cleanup.watch_open_prs(_cfg(tmp_path), led, vk, slack)          # unchanged: silent

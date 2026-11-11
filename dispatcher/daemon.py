@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as cfgmod
-from . import infra
+from . import infra, slackthread
 from . import pr as prmod
 from .cleanup import process_closed_prs, sync_deleted_tasks, watch_open_prs
 from .config import Config
@@ -85,7 +85,7 @@ class Dispatcher:
         self.env_file = env_file
         self.vk = Vikunja(cfg.vikunja_url, cfg.vikunja_token)
         self.ledger = Ledger(cfg.db_path)
-        self.slack = Slack(cfg.slack_webhook)
+        self.slack = Slack(cfg.slack_webhook, cfg.slack_bot_token, thread_for=self.ledger.thread)
         self.ntree = Ntree(cfg.repo_path, cfg.base_branch)
         # Pool has a fixed ceiling; the tick gate limits real concurrency to
         # cfg.max_workers, so changing MAX_WORKERS live (hot-reload) takes effect.
@@ -285,8 +285,25 @@ class Dispatcher:
         self.move(tid, "in_progress")
         self.comment(tid, f"dispatched: session=pending pid={os.getpid()} workspace={slug}")
         self.ledger.upsert_claim(tid, slug, slug)
+        self._remember_thread(task)
         log.info("claimed task %s -> %s", tid, slug)
         self.pool.submit(self._safe_pipeline, task, slug)
+
+    def _remember_thread(self, task: dict) -> None:
+        """Store the planner thread named by the task's `Source:` line, if any, so its events are
+        posted there. Never fails the claim."""
+        tid = task["id"]
+        try:
+            desc = task.get("description")
+            if desc is None:
+                desc = self.vk.task(tid).get("description") or ""
+            found = slackthread.parse_source(desc)
+            self.ledger.update(tid, slack_channel=found.channel if found else None,
+                               slack_thread=found.ts if found else None)
+            if found:
+                log.info("task %s reports into Slack thread %s/%s", tid, found.channel, found.ts)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not read the Slack thread of task %s: %s", tid, e)
 
     # --- per-task pipeline ----------------------------------------------
     def _safe_pipeline(self, task: dict, slug: str) -> None:

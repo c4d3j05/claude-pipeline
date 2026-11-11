@@ -84,6 +84,7 @@ class Config:
 
     # Notifications / paths
     slack_webhook: str
+    slack_bot_token: str   # claude-planner's bot: posts task events into its Slack threads
     db_path: Path
     log_level: str
 
@@ -162,6 +163,7 @@ def load(env_file: str | None = ".env") -> Config:
         baseline_check=_str(src, "BASELINE_CHECK", "true").lower() not in ("0", "false", "no", "off"),
         db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),
+        slack_bot_token=_str(src, "SLACK_BOT_TOKEN"),
         db_path=Path(_str(src, "PIPELINE_DB", "pipeline.db")).expanduser(),
         log_level=_str(src, "LOG_LEVEL", "INFO").upper(),
     )
