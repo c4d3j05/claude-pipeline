@@ -165,6 +165,8 @@ def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, bucke
             log.warning("vikunja update on close failed for task %s: %s", task_id, e)
 
         ledger.update(task_id, state="done" if merged else "blocked", pr_url=pr.get("url"))
+        if merged and slack is not None:
+            slack.task_merged(task_id, pr.get("url") or "", row["cost_usd"], row["lifetime_cost"])
 
 
 def prune_stale(cfg: Config, ledger: Ledger, ntree: Ntree) -> list[str]:
