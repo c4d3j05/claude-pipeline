@@ -87,7 +87,16 @@ class Config:
     db_path: Path
     log_level: str
 
+    # Capacity: test gates are CPU/DB heavy, so they run at most MAX_GATES at a time.
+    max_gates: int = 1
+    gate_timeout_min: int = 30
+    # Transient API/network failures are retried before a task is blocked.
+    transient_retries: int = 2
+    # Run the gate once per base commit before spending on a worker (red base = env problem).
+    baseline_check: bool = True
+
     # Housekeeping
+    log_retention_days: int = 30
     blocked_retention_days: int = 7
     db_name_template: str = "app_{slug}"   # per-workspace DB dropped on teardown
 
@@ -128,7 +137,7 @@ def load(env_file: str | None = ".env") -> Config:
         base_branch=_str(src, "BASE_BRANCH", "main"),
         pr_label=_str(src, "PR_LABEL", "claude-worker"),
         test_cmd=_str(src, "TEST_CMD", "uv run pytest -x -q"),
-        max_workers=_int(src, "MAX_WORKERS", 4),
+        max_workers=_int(src, "MAX_WORKERS", 2),
         poll_interval=_int(src, "POLL_INTERVAL", 60),
         max_turns=_int(src, "MAX_TURNS", 60),
         wall_clock_limit_min=_int(src, "WALL_CLOCK_LIMIT_MIN", 45),
@@ -140,6 +149,11 @@ def load(env_file: str | None = ".env") -> Config:
         daily_cap_usd=_float(src, "DAILY_CAP_USD", 50.0),
         task_cap_usd=_float(src, "TASK_CAP_USD", 10.0),
         blocked_retention_days=_int(src, "BLOCKED_RETENTION_DAYS", 7),
+        log_retention_days=_int(src, "LOG_RETENTION_DAYS", 30),
+        max_gates=max(1, _int(src, "MAX_GATES", 1)),
+        gate_timeout_min=_int(src, "GATE_TIMEOUT_MIN", 30),
+        transient_retries=_int(src, "TRANSIENT_RETRIES", 2),
+        baseline_check=_str(src, "BASELINE_CHECK", "true").lower() not in ("0", "false", "no", "off"),
         db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),
         db_path=Path(_str(src, "PIPELINE_DB", "pipeline.db")).expanduser(),

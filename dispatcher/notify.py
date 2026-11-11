@@ -25,6 +25,9 @@ class Slack:
         except requests.RequestException as e:
             log.warning("slack post failed: %s", e)
 
+    def alert(self, text: str) -> None:
+        self.post(f":rotating_light: claude-pipeline: {text}")
+
     def task_blocked(self, task_id: int, reason: str, link: str) -> None:
         self.post(f":no_entry: Task {task_id} *blocked*: {reason}\n{link}")
 

@@ -34,6 +34,13 @@ CREATE TABLE IF NOT EXISTS daily_cost (
     cap_notified INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS baseline (
+    sha        TEXT PRIMARY KEY,           -- base commit the gate was run against
+    green      INTEGER NOT NULL,
+    tail       TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS control (
     id     INTEGER PRIMARY KEY CHECK (id = 1),
     paused INTEGER NOT NULL DEFAULT 0
@@ -67,6 +74,10 @@ class Ledger:
 
     def _migrate(self) -> None:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)")}
+        if "pr_status" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN pr_status TEXT")
+        if "lifetime_cost" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN lifetime_cost REAL NOT NULL DEFAULT 0")
         if "pruned" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN pruned INTEGER NOT NULL DEFAULT 0")
         if "cancel_requested" not in cols:
@@ -86,7 +97,7 @@ class Ledger:
                        started_at=excluded.started_at,
                        -- a re-queued task is a fresh attempt: fresh budget and retries
                        test_retries=0, review_retries=0, cost_usd=0,
-                       cancel_requested=0, pruned=0, pid=NULL, pr_url=NULL""",
+                       cancel_requested=0, pruned=0, pid=NULL, pr_url=NULL, pr_status=NULL""",
                 (task_id, slug, branch, _now(), _now()),
             )
             self.conn.commit()
@@ -130,8 +141,9 @@ class Ledger:
             row = self.get(task_id)
             base = row["cost_usd"] if row else 0.0
             self.conn.execute(
-                "UPDATE tasks SET cost_usd=?, updated_at=? WHERE task_id=?",
-                (base + delta_usd, _now(), task_id),
+                "UPDATE tasks SET cost_usd=?, lifetime_cost=lifetime_cost+?, updated_at=? "
+                "WHERE task_id=?",
+                (base + delta_usd, delta_usd, _now(), task_id),
             )
             self.conn.execute(
                 """INSERT INTO daily_cost (day, cost_usd) VALUES (?, ?)
@@ -206,6 +218,33 @@ class Ledger:
         with self._lock:
             return self.conn.execute(
                 "SELECT * FROM tasks WHERE state='blocked' AND pruned=0 AND updated_at < ?",
+                (cutoff,),
+            ).fetchall()
+
+    # --- baseline (gate result per base commit) -----------------------------------------
+    def get_baseline(self, sha: str, max_age_h: float = 6.0) -> sqlite3.Row | None:
+        cutoff = (dt.datetime.now() - dt.timedelta(hours=max_age_h)).isoformat(timespec="seconds")
+        with self._lock:
+            return self.conn.execute(
+                "SELECT * FROM baseline WHERE sha=? AND checked_at >= ?", (sha, cutoff)
+            ).fetchone()
+
+    def set_baseline(self, sha: str, green: bool, tail: str = "") -> None:
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO baseline (sha, green, tail, checked_at) VALUES (?, ?, ?, ?)
+                   ON CONFLICT(sha) DO UPDATE SET green=excluded.green, tail=excluded.tail,
+                       checked_at=excluded.checked_at""",
+                (sha, 1 if green else 0, tail[-2000:], _now()),
+            )
+            self.conn.commit()
+
+    def finished_before(self, days: int) -> list[sqlite3.Row]:
+        """Tasks that are done/blocked and haven't changed for `days` (for log pruning)."""
+        cutoff = (dt.datetime.now() - dt.timedelta(days=days)).isoformat(timespec="seconds")
+        with self._lock:
+            return self.conn.execute(
+                "SELECT * FROM tasks WHERE state IN ('done','blocked') AND updated_at < ?",
                 (cutoff,),
             ).fetchall()
 

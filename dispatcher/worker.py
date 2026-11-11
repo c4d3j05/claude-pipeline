@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
-import signal
 import subprocess
 import threading
-import time
 from pathlib import Path
 
 from .log import get
+from .proc import kill_group
 from .procenv import clean_env
 from .stream import SessionResult, parse_event
 
@@ -77,7 +75,7 @@ def launch(
             text=True,
             bufsize=1,
             start_new_session=True,  # own process group, so we can kill children too
-            env={**clean_env(), **(extra_env or {})},
+            env={**clean_env("claude"), **(extra_env or {})},
         )
 
         def _expire() -> None:
@@ -113,32 +111,3 @@ def launch(
             timer.cancel()
             rc = proc.wait()
     return result, (124 if timed_out.is_set() else rc)
-
-
-def kill_group(pid: int, grace: float = 15.0, proc: subprocess.Popen | None = None) -> None:
-    """Stop a process group gracefully: SIGTERM, wait up to `grace`s, SIGKILL stragglers.
-
-    The wait matters: git removes its lock files when it receives SIGTERM, but a SIGKILL
-    leaves .git/config.lock (and friends) behind, which then breaks every later
-    `git worktree add` / `git config` in the repo. Pass `proc` when the leader is our own
-    child so it is reaped (a zombie leader would keep the group looking alive).
-    """
-    try:
-        pgid = os.getpgid(pid)
-        os.killpg(pgid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return
-    deadline = time.monotonic() + grace
-    while time.monotonic() < deadline:
-        if proc is not None:
-            proc.poll()
-        try:
-            os.killpg(pgid, 0)
-        except (ProcessLookupError, PermissionError):
-            return  # whole group exited on SIGTERM — nothing left to leave a lock behind
-        time.sleep(0.1)
-    log.warning("process group %s ignored SIGTERM for %.0fs; sending SIGKILL", pgid, grace)
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass

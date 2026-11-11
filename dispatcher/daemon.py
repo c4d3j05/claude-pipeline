@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -14,12 +15,13 @@ from pathlib import Path
 
 from . import config as cfgmod
 from . import pr as prmod
-from .cleanup import process_closed_prs
+from .cleanup import process_closed_prs, watch_open_prs
 from .config import Config
 from .db import ACTIVE_STATES, Ledger
 from .log import get
 from .notify import Slack
 from .ntree import Ntree, NtreeError
+from .proc import kill_group
 from .procenv import load_env_file
 from .prompt import (
     commit_or_discard_prompt,
@@ -28,10 +30,10 @@ from .prompt import (
     task_slug,
     worker_prompt,
 )
-from .review import adversarial_review, run_tests, working_tree_dirty
+from .review import GateTimeout, adversarial_review, run_tests, working_tree_dirty
 from .stream import SessionResult, blocked_reason
 from .vikunja import Vikunja
-from .worker import kill_group, launch
+from .worker import launch
 
 log = get("daemon")
 
@@ -46,6 +48,19 @@ class _Run:
 
 
 Stop = tuple[str, str]  # ("cancel" | "block", reason)
+
+# Seconds to wait before retrying a session that failed for a transient reason.
+TRANSIENT_BACKOFF_S = (30.0, 120.0)
+_TRANSIENT = re.compile(
+    r"overloaded|\b529\b|\b50[234]\b|rate.?limit|too many requests|econnreset|etimedout|"
+    r"enotfound|eai_again|network|connection (?:reset|refused|error|closed)|temporar|try again",
+    re.IGNORECASE)
+# Credentials problems fail EVERY task identically: pause dispatching instead of draining
+# the whole queue into Blocked.
+_AUTH = re.compile(
+    r"not logged in|please run /login|invalid api key|authentication|unauthori[sz]ed|"
+    r"oauth token|credit balance|\b401\b", re.IGNORECASE)
+TICK_FAILURES_BEFORE_ALERT = 3
 
 POOL_CEILING = 32  # hard cap on threads; live concurrency is gated by cfg.max_workers
 
@@ -67,6 +82,9 @@ class Dispatcher:
         self._stop = threading.Event()
         self._last_cleanup = 0.0
         self._label_id = 0
+        self._gate_sem = threading.BoundedSemaphore(cfg.max_gates)
+        self._baseline_lock = threading.Lock()
+        self._tick_failures = 0
 
     # --- bucket / label resolution --------------------------------------
     def refresh_board(self) -> None:
@@ -108,20 +126,45 @@ class Dispatcher:
             "dispatcher up: project=%s view=%s max_workers=%s repo=%s",
             self.cfg.project_id, self.view_id, self.cfg.max_workers, self.cfg.repo_path,
         )
-        signal.signal(signal.SIGTERM, lambda *_: self._stop.set())
-        signal.signal(signal.SIGINT, lambda *_: self._stop.set())
+        signal.signal(signal.SIGTERM, self._on_signal)
+        signal.signal(signal.SIGINT, self._on_signal)
 
         while not self._stop.is_set():
-            try:
-                self.tick()
-            except Exception:
-                log.exception("tick failed")
+            self._guarded_tick()
             self._stop.wait(self.cfg.poll_interval)
 
         log.info("shutting down; waiting for %d running task(s) to finish…",
                  self.ledger.active_count())
         self.pool.shutdown(wait=True)
         self.ledger.close()
+
+    def _guarded_tick(self) -> None:
+        """One poll; repeated failures (expired Vikunja token, API down) alert the human."""
+        try:
+            self.tick()
+        except Exception as e:
+            self._tick_failures += 1
+            log.exception("tick failed (%d in a row)", self._tick_failures)
+            if self._tick_failures == TICK_FAILURES_BEFORE_ALERT:
+                self.slack.alert(f"dispatcher poll has failed {self._tick_failures}x in a row: {e}")
+            return
+        if self._tick_failures >= TICK_FAILURES_BEFORE_ALERT:
+            self.slack.alert("dispatcher poll recovered")
+        self._tick_failures = 0
+
+    def _on_signal(self, signum, _frame) -> None:
+        """First signal drains (finish running tasks); a second one stops workers and exits."""
+        if self._stop.is_set():
+            self._force_stop()
+        log.info("signal %s: draining running tasks (send again to stop them and exit)", signum)
+        self._stop.set()
+
+    def _force_stop(self) -> None:
+        log.warning("second signal: stopping workers and exiting now")
+        for row in self.ledger.active():
+            if row["pid"] and _is_claude_proc(row["pid"]):
+                kill_group(row["pid"], grace=5)
+        os._exit(1)  # ledger rows stay active; the next start reaps/blocks them
 
     def _reload_config(self) -> None:
         """Hot-reload the operational knobs from .env (dashboard edits them live).
@@ -152,6 +195,7 @@ class Dispatcher:
             self._last_cleanup = now
             self.refresh_board()
             process_closed_prs(self.cfg, self.ledger, self.ntree, self.vk, self.buckets, self.slack)
+            watch_open_prs(self.cfg, self.ledger, self.vk, self.slack)
 
         # Operator pause (from the dashboard): keep running workers, stop claiming.
         if self.ledger.is_paused():
@@ -232,25 +276,50 @@ class Dispatcher:
         self.ledger.add_cost(tid, result.cost_usd)
 
     def _launch(self, tid, worktree, slug, prompt, logname, resume_session=""):
-        """Run one worker session, account its cost, and always clear the stored PID."""
-        try:
-            result, rc = launch(
-                worktree=worktree,
-                prompt=prompt,
-                settings_file=self.cfg.settings_file,
-                session_log=self._session_log(slug, logname),
-                max_turns=self.cfg.max_turns,
-                wall_clock_limit_min=self.cfg.wall_clock_limit_min,
-                model=self.cfg.worker_model,
-                permission_mode=self.cfg.permission_mode,
-                resume_session=resume_session,
-                on_pid=lambda p: self.ledger.update(tid, pid=p),
-                extra_env=workspace_env(worktree, slug),
-            )
-        finally:
-            self.ledger.update(tid, pid=None)  # a stale PID could be reused by another process
-        self._account_cost(tid, result)
+        """Run one worker session, account its cost, always clear the stored PID.
+
+        A transient failure (API overloaded, network blip, rate limit) is retried with
+        backoff instead of blocking the task; every attempt's cost is accounted.
+        """
+        attempts = 1 + max(0, self.cfg.transient_retries)
+        for attempt in range(attempts):
+            try:
+                result, rc = launch(
+                    worktree=worktree,
+                    prompt=prompt,
+                    settings_file=self.cfg.settings_file,
+                    session_log=self._session_log(slug, logname),
+                    max_turns=self.cfg.max_turns,
+                    wall_clock_limit_min=self.cfg.wall_clock_limit_min,
+                    model=self.cfg.worker_model,
+                    permission_mode=self.cfg.permission_mode,
+                    resume_session=resume_session,
+                    on_pid=lambda p: self.ledger.update(tid, pid=p),
+                    extra_env=workspace_env(worktree, slug),
+                )
+            finally:
+                self.ledger.update(tid, pid=None)  # a stale PID could be reused later
+            self._account_cost(tid, result)
+            if attempt + 1 >= attempts or not self._is_transient(result, rc):
+                break
+            if self.ledger.cancel_requested(tid):
+                break
+            delay = TRANSIENT_BACKOFF_S[min(attempt, len(TRANSIENT_BACKOFF_S) - 1)]
+            log.warning("transient failure for task %s (rc=%s); retry %d/%d in %.0fs",
+                        tid, rc, attempt + 1, attempts - 1, delay)
+            self.comment(tid, f"transient error, retrying in {delay:.0f}s "
+                              f"({attempt + 1}/{attempts - 1})")
+            if self._stop.wait(delay):
+                break
         return result, rc
+
+    def _is_transient(self, result, rc: int) -> bool:
+        if rc == 124 or result.num_turns >= self.cfg.max_turns:
+            return False
+        if rc == 0 and not result.is_error:
+            return False
+        text = f"{result.result_text} {result.last_message}"
+        return bool(_TRANSIENT.search(text)) and not _AUTH.search(text)
 
     def _cap_hit(self, result, rc: int) -> str | None:
         if rc == 124:
@@ -280,6 +349,11 @@ class Dispatcher:
         if reason:
             return ("block", reason)
         cap = self._cap_hit(result, rc) or self._over_task_budget(tid)
+        if cap and cap.startswith("worker error") and _AUTH.search(cap):
+            self.ledger.set_paused(True)
+            self.slack.alert(f"credentials problem ({cap[:120]}); dispatching is PAUSED — "
+                             "fix the login, then resume from the dashboard")
+            cap += " — dispatching paused until credentials are fixed"
         return ("block", cap) if cap else None
 
     def _halt(self, tid: int, slug: str, stop: Stop) -> None:
@@ -294,7 +368,43 @@ class Dispatcher:
         run.session_id = result.session_id or run.session_id  # resume may fork a new id
         return self._stop_reason(tid, result, rc)
 
+    def _gate(self, slug: str) -> tuple[bool, str]:
+        """Run the test gate, at most MAX_GATES at a time (the queue wait is not timed)."""
+        with self._gate_sem:
+            return run_tests(self.cfg, self.ntree, slug)
+
     def _verify(self, tid, worktree, slug, run: _Run) -> Stop | None:
+        try:
+            return self._verify_inner(tid, worktree, slug, run)
+        except GateTimeout as e:
+            return ("block", f"gate: {e}")
+
+    def _baseline(self, tid, worktree, slug, base_ref: str) -> Stop | None:
+        """Run the gate on the untouched base once per commit; red base = environment problem.
+
+        Without this a broken environment sends a paid worker off to "fix" unrelated
+        failures. The result is cached per base SHA, so only the first task pays the time.
+        """
+        if not self.cfg.baseline_check:
+            return None
+        sha = self.ntree.rev(base_ref) or base_ref
+        try:
+            with self._baseline_lock:  # single-flight: concurrent tasks reuse the result
+                row = self.ledger.get_baseline(sha)
+                if row is None:
+                    green, tail = self._gate(slug)
+                    self.ledger.set_baseline(sha, green, tail)
+                else:
+                    green, tail = bool(row["green"]), row["tail"]
+        except GateTimeout as e:
+            return ("block", f"baseline: {e}")
+        if green:
+            return None
+        return ("block", (f"baseline red: tests already fail on {base_ref} ({sha[:9]}) before any "
+                          f"change — fix the base branch or environment, then re-queue\n"
+                          f"{tail[-600:]}"))
+
+    def _verify_inner(self, tid, worktree, slug, run: _Run) -> Stop | None:
         """GATE 1: tests green AND working tree clean, re-checked after every worker turn.
 
         Pushing only sends commits, so a green run on a dirty tree proves nothing about
@@ -304,7 +414,9 @@ class Dispatcher:
         self.ledger.update(tid, state="testing")
         settled = False
         while True:
-            green, tail = run_tests(cfg, self.ntree, slug)
+            if self.ledger.cancel_requested(tid):
+                return ("cancel", "")
+            green, tail = self._gate(slug)
             while not green:
                 row = self.ledger.get(tid)
                 if row["test_retries"] >= cfg.max_test_retries:
@@ -315,7 +427,9 @@ class Dispatcher:
                 stop = self._resume_step(tid, worktree, slug, run, retry_prompt_tests(tail))
                 if stop:
                     return stop
-                green, tail = run_tests(cfg, self.ntree, slug)
+                if self.ledger.cancel_requested(tid):
+                    return ("cancel", "")
+                green, tail = self._gate(slug)
             if not working_tree_dirty(worktree):
                 return None
             if settled:
@@ -346,6 +460,15 @@ class Dispatcher:
         worktree = self.ntree.new(slug, base_ref)
         self.ledger.update(tid, state="working", workspace=slug)
 
+        # A cancel requested during setup (minutes of installs) must not cost a worker run.
+        if self.ledger.cancel_requested(tid):
+            return self._cancelled(tid, slug)
+        stop = self._baseline(tid, worktree, slug, base_ref)
+        if stop:
+            return self._halt(tid, slug, stop)
+        if self.ledger.cancel_requested(tid):
+            return self._cancelled(tid, slug)
+
         # First worker attempt
         result, rc = self._launch(tid, worktree, slug, worker_prompt(tid, title, desc, slug),
                                   "session.jsonl")
@@ -362,6 +485,8 @@ class Dispatcher:
 
         # GATE 2: adversarial review
         spec = f"{title}\n\n{desc}"
+        if self.ledger.cancel_requested(tid):  # cancelled during the test gate
+            return self._cancelled(tid, slug)
         self.ledger.update(tid, state="reviewing")
         review = self._review(tid, worktree, slug, spec, base_ref)
         while True:

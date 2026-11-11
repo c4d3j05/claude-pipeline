@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
+from pathlib import Path
 
 from .config import Config
 from .db import Ledger
@@ -11,6 +13,7 @@ from .log import get
 from .notify import Slack
 from .ntree import Ntree
 from .pr import open_worker_prs
+from .procenv import clean_env
 
 log = get("cleanup")
 
@@ -30,7 +33,8 @@ def _dropdb(cfg: Config, slug: str) -> None:
     """
     db = cfg.db_name_template.format(slug=slug.replace("-", "_"))
     try:
-        cp = subprocess.run(["dropdb", "--if-exists", db], capture_output=True, text=True)
+        cp = subprocess.run(["dropdb", "--if-exists", db], capture_output=True, text=True,
+                            env=clean_env("plain"))
         if cp.returncode != 0:
             log.debug("dropdb %s: %s", db, cp.stderr.strip())
     except FileNotFoundError:
@@ -56,6 +60,63 @@ def closed_prs_to_process(prs: list[dict]) -> list[dict]:
             if p.get("state") in ("MERGED", "CLOSED") and p.get("headRefName") not in open_heads]
 
 
+_BAD_CHECKS = ("FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR")
+
+
+def pr_problem(pr: dict) -> str:
+    """Why an open PR needs a human, or '' if it looks healthy."""
+    reasons: list[str] = []
+    if pr.get("mergeable") == "CONFLICTING":
+        reasons.append("merge conflicts with the base branch")
+    bad = sorted({
+        c.get("name") or c.get("context") or "check"
+        for c in (pr.get("statusCheckRollup") or [])
+        if (c.get("conclusion") or c.get("state") or "").upper() in _BAD_CHECKS
+    })
+    if bad:
+        reasons.append("failing checks: " + ", ".join(bad[:5]))
+    if pr.get("reviewDecision") == "CHANGES_REQUESTED":
+        reasons.append("changes requested by a reviewer")
+    return "; ".join(reasons)
+
+
+def watch_open_prs(cfg: Config, ledger: Ledger, vikunja, slack: Slack) -> None:
+    """Tell the human when a pipeline PR gets conflicts, failing CI, or requested changes.
+
+    The pipeline never touches an open PR, so without this a PR can rot unnoticed. Posts
+    a card comment (and Slack) once per change of status, not on every poll.
+    """
+    for pr in open_worker_prs(cfg):
+        if pr.get("state") != "OPEN":
+            continue
+        task_id = task_id_from_branch(pr.get("headRefName", ""))
+        row = ledger.get(task_id) if task_id is not None else None
+        if row is None or row["state"] != "pr_open" or row["pr_url"] != pr.get("url"):
+            continue
+        problem = pr_problem(pr)
+        if problem == (row["pr_status"] or ""):
+            continue
+        ledger.update(task_id, pr_status=problem)
+        text = f"PR needs attention: {problem}" if problem else "PR looks healthy again"
+        try:
+            vikunja.comment(task_id, f"<p>{text} ({pr.get('url')})</p>")
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not comment on task %s: %s", task_id, e)
+        if problem:
+            slack.alert(f"task {task_id}: {text} {pr.get('url')}")
+
+
+def prune_logs(cfg: Config, ledger: Ledger, logs_root: Path) -> int:
+    """Delete session logs of tasks that finished more than LOG_RETENTION_DAYS ago."""
+    n = 0
+    for row in ledger.finished_before(cfg.log_retention_days):
+        d = logs_root / row["slug"]
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+            n += 1
+    return n
+
+
 def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, buckets, slack: Slack) -> None:
     """Poll worker PRs; for any that closed, tear down and update Vikunja.
 
@@ -68,8 +129,13 @@ def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, bucke
         if task_id is None:
             continue
         row = ledger.get(task_id)
-        if row is None or row["state"] in ("done", "blocked"):
-            continue  # already handled
+        # Only the PR of the *current* attempt may tear anything down. A re-queued task
+        # reuses its branch name, so an old closed PR must not destroy the new attempt's
+        # running workspace (state working/testing/…) or be mistaken for its PR.
+        if row is None or row["state"] != "pr_open":
+            continue
+        if row["pr_url"] and row["pr_url"] != pr.get("url"):
+            continue
 
         merged = pr.get("state") == "MERGED"
         slug = row["slug"]
@@ -81,10 +147,11 @@ def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, bucke
         _safe("ntree rm", slug, lambda slug=slug: ntree.rm(slug))       # frees ports, removes worktree
         _safe("dropdb", slug, lambda slug=slug: _dropdb(cfg, slug))          # drop per-workspace DB
         _safe("branch -D", slug, lambda branch=branch: subprocess.run(  # local branch
-            ["git", "branch", "-D", branch], cwd=cfg.repo_path, capture_output=True, text=True))
+            ["git", "branch", "-D", branch], cwd=cfg.repo_path, capture_output=True, text=True,
+            env=clean_env("plain")))
         _safe("push --delete", slug, lambda branch=branch: subprocess.run(  # remote (if auto-delete off)
             ["git", "push", "origin", "--delete", branch], cwd=cfg.repo_path,
-            capture_output=True, text=True))
+            capture_output=True, text=True, env=clean_env("github")))
 
         # Vikunja: move + comment
         target = buckets["done"] if merged else buckets["blocked"]
@@ -117,7 +184,8 @@ def prune_stale(cfg: Config, ledger: Ledger, ntree: Ntree) -> list[str]:
     return removed
 
 
-def nightly(cfg: Config, ntree: Ntree, slack: Slack, ledger: Ledger | None = None) -> str:
+def nightly(cfg: Config, ntree: Ntree, slack: Slack, ledger: Ledger | None = None,
+            logs_root: Path | None = None) -> str:
     """ntree doctor + prune + report. Returns a human summary (also sent to Slack by caller)."""
     lines: list[str] = []
     swept = ntree.clear_stale_git_locks()
@@ -127,6 +195,8 @@ def nightly(cfg: Config, ntree: Ntree, slack: Slack, ledger: Ledger | None = Non
         pruned = prune_stale(cfg, ledger, ntree)
         lines.append(f"pruned {len(pruned)} stale blocked workspace(s)"
                      + (f": {', '.join(pruned)}" if pruned else ""))
+        n = prune_logs(cfg, ledger, logs_root or Path("logs"))
+        lines.append(f"pruned {n} old task log folder(s)")
     doc = ntree.doctor()
     lines.append("ntree doctor: " + ("ok" if doc.returncode == 0 else "issues"))
     if doc.stdout.strip():

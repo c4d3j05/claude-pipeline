@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from .log import get
+from .proc import TIMEOUT_RC, run_group
 from .procenv import clean_env, with_git_config
 
 log = get("ntree")
@@ -37,16 +38,17 @@ class Ntree:
 
     def _run(self, args: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
         log.debug("ntree %s (cwd=%s)", " ".join(args), self.repo)
-        return subprocess.run(
+        # run_group: on timeout the whole tree (pytest, servers, package managers) is stopped,
+        # not just `ntree` itself. Credentials: none — ntree runs the repo's own setup and
+        # test commands, including worker-written code.
+        return run_group(
             ["ntree", *args],
             cwd=self.repo,
-            capture_output=True,
-            text=True,
             timeout=timeout,
             # Forking from a remote ref (origin/main) makes git write upstream-tracking
             # config into the shared .git/config. We never want that (the PR push sets its
             # own upstream) and it contends for config.lock with every other git process.
-            env=with_git_config(clean_env(), branch__autoSetupMerge="false"),
+            env=with_git_config(clean_env("plain"), branch__autoSetupMerge="false"),
         )
 
     def _git_common_dir(self) -> Path | None:
@@ -84,6 +86,12 @@ class Ntree:
                 removed.append(lock)
         return removed
 
+    def rev(self, ref: str) -> str:
+        """Resolve a ref to a commit SHA ('' if it can't be resolved)."""
+        cp = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref], cwd=self.repo,
+                            capture_output=True, text=True, timeout=30, env=clean_env("plain"))
+        return cp.stdout.strip() if cp.returncode == 0 else ""
+
     def base_ref(self) -> str:
         """The ref workspaces fork from and PRs are diffed against.
 
@@ -92,7 +100,7 @@ class Ntree:
         """
         try:
             subprocess.run(["git", "fetch", "--quiet", "origin", self.base], cwd=self.repo,
-                           capture_output=True, text=True, timeout=120, env=clean_env())
+                           capture_output=True, text=True, timeout=120, env=clean_env("github"))
             cp = subprocess.run(
                 ["git", "rev-parse", "--verify", "--quiet", f"origin/{self.base}"],
                 cwd=self.repo, capture_output=True, text=True, timeout=30)
@@ -106,6 +114,8 @@ class Ntree:
         args = ["new", slug, "--from", base_ref or self.base]
         cp = self._run(args, timeout=1200)
         out = (cp.stderr + cp.stdout)
+        if cp.returncode == TIMEOUT_RC:
+            raise NtreeError(f"ntree new {slug} timed out")
         for _ in range(LOCK_RETRIES - 1):
             if cp.returncode == 0 or "could not lock" not in out:
                 break
