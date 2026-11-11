@@ -33,7 +33,14 @@ from .prompt import (
     task_slug,
     worker_prompt,
 )
-from .review import GateTimeout, adversarial_review, has_work, run_tests, working_tree_dirty
+from .review import (
+    GateTimeout,
+    adversarial_review,
+    has_work,
+    head_sha,
+    run_tests,
+    working_tree_dirty,
+)
 from .stream import SessionResult, blocked_reason, parse_lines
 from .vikunja import Vikunja
 from .worker import launch
@@ -67,7 +74,7 @@ TICK_FAILURES_BEFORE_ALERT = 3
 # Blocks that leave a worker's progress in the workspace: a re-queue resumes instead of wiping.
 _RESUMABLE = ("cap: turns", "cap: wall-clock", "cap: task cost")
 # Blocks where the worker's job was already done: a re-queue only re-runs the gates.
-_GATES_ONLY = ("environment:",)
+_GATES_ONLY = ("environment:", "review error:")
 
 POOL_CEILING = 32  # hard cap on threads; live concurrency is gated by cfg.max_workers
 
@@ -406,6 +413,14 @@ class Dispatcher:
         except GateTimeout as e:
             return ("block", f"gate: {e}")
 
+    def _verify_and_remember(self, tid, worktree, slug, run: _Run) -> Stop | None:
+        """_verify, then record the commit the tests passed on (lets a review-only recovery
+        skip the 11-minute gate when nothing has changed)."""
+        stop = self._verify(tid, worktree, slug, run)
+        if stop is None:
+            self.ledger.update(tid, tested_sha=head_sha(worktree))
+        return stop
+
     def _baseline(self, tid, worktree, slug, base_ref: str) -> Stop | None:
         """Run the gate on the untouched base once per commit; red base = environment problem.
 
@@ -545,6 +560,7 @@ class Dispatcher:
             self.ntree.rm(slug)
             self.ntree.remove_branch(slug)
             worktree = self.ntree.new(slug, base_ref)
+            self.ledger.update(tid, tested_sha=None)
         self.ledger.update(tid, state="working", workspace=slug, resumable=0)
 
         # A cancel requested during setup (minutes of installs) must not cost a worker run.
@@ -593,7 +609,13 @@ class Dispatcher:
             return self._halt(tid, slug, stop)
 
         # GATE 1: tests + clean tree (the dispatcher runs them; it does not trust the worker)
-        stop = self._verify(tid, worktree, slug, run)
+        if (gates_only and row0["tested_sha"] and row0["tested_sha"] == head_sha(worktree)
+                and not working_tree_dirty(worktree)):
+            self.comment(tid, "the tests already passed on this exact commit; going straight "
+                              "to the review")
+            stop = None
+        else:
+            stop = self._verify_and_remember(tid, worktree, slug, run)
         if stop:
             return self._halt(tid, slug, stop)
 
@@ -605,7 +627,8 @@ class Dispatcher:
         review = self._review(tid, worktree, slug, spec, base_ref)
         while True:
             if review.get("error"):  # the reviewer itself failed — not the worker's fault
-                return self._block(tid, "review error: reviewer session failed")
+                return self._block(tid, "review error: the reviewer produced no verdict, even "
+                                        "when asked for one")
             over = self._over_task_budget(tid)
             if over:
                 return self._block(tid, over)
@@ -621,7 +644,7 @@ class Dispatcher:
             stop = self._resume_step(
                 tid, worktree, slug, run, retry_prompt_review(review.get("findings", [])))
             if not stop:
-                stop = self._verify(tid, worktree, slug, run)  # tests + clean tree again
+                stop = self._verify_and_remember(tid, worktree, slug, run)  # tests + clean tree again
             if stop:
                 return self._halt(tid, slug, stop)
             self.ledger.update(tid, state="reviewing")

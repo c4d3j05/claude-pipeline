@@ -94,6 +94,8 @@ class Config:
     transient_retries: int = 2
     # A worker that hits the turn cap with work in progress is resumed this many times.
     max_continuations: int = 2
+    # Upper bound on the reviewer's turns; the actual budget grows with the size of the diff.
+    review_max_turns: int = 30
     # Run the gate once per base commit before spending on a worker (red base = env problem).
     baseline_check: bool = True
 
@@ -156,6 +158,7 @@ def load(env_file: str | None = ".env") -> Config:
         gate_timeout_min=_int(src, "GATE_TIMEOUT_MIN", 30),
         transient_retries=_int(src, "TRANSIENT_RETRIES", 2),
         max_continuations=_int(src, "MAX_CONTINUATIONS", 2),
+        review_max_turns=max(4, _int(src, "REVIEW_MAX_TURNS", 30)),
         baseline_check=_str(src, "BASELINE_CHECK", "true").lower() not in ("0", "false", "no", "off"),
         db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),

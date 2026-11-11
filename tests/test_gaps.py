@@ -52,6 +52,15 @@ if mode in ("turncap_once", "turncap_always"):
         print(json.dumps({"type": "result", "subtype": "error_max_turns", "total_cost_usd": 0.5,
                           "num_turns": 99, "is_error": True, "result": "Reached max turns"}), flush=True)
         sys.exit(1)
+if mode in ("revcap", "revcap_stuck"):
+    # a reviewer that runs out of turns; "revcap" then answers when asked to resume with a verdict
+    if mode == "revcap_stuck" or "--resume" not in sys.argv:
+        print(json.dumps({"type": "result", "subtype": "error_max_turns", "total_cost_usd": 0.5,
+                          "num_turns": 99, "is_error": True}), flush=True)
+        sys.exit(1)
+    print(json.dumps({"type": "result", "subtype": "success", "total_cost_usd": 0.7, "num_turns": 1,
+                      "is_error": False, "result": '{"verdict":"pass","findings":[]}'}), flush=True)
+    sys.exit(0)
 if mode == "noconv" and "--resume" in sys.argv:
     print(json.dumps({"type": "result", "total_cost_usd": 0, "num_turns": 0, "is_error": True,
                       "result": "No conversation found with session ID: x"}), flush=True)
@@ -1812,3 +1821,136 @@ def test_environment_blocks_tell_the_human_to_start_the_service():
 
     text = next_step("environment: cannot reach the database at localhost:5432", True)
     assert "a service the tests need is down" in text and "only the test gates are re-run" in text
+
+
+# =====================================================================================
+# The reviewer must not be able to wedge a finished task
+# =====================================================================================
+def test_review_turn_budget_grows_with_the_diff_and_is_capped():
+    from dispatcher.review import review_turns
+
+    assert review_turns(2_000, 30) == 10                 # small diff: 10 turns
+    assert review_turns(127_514, 30) == 22               # task 819's diff: needed more than the old fixed 8
+    assert review_turns(900_000, 30) == 30               # never beyond the cap
+    assert review_turns(0, 2) == 4                       # and never uselessly small
+
+
+def _review_calls(tmp_path, repo, monkeypatch, mode):
+    import json
+
+    calls = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_CALLS_OUT", str(calls))
+    monkeypatch.setenv("FAKE_MODE", mode)
+    v = adversarial_review(_cfg(tmp_path, repo), repo, "spec", tmp_path / "r.jsonl")
+    return v, [json.loads(line) for line in calls.read_text().splitlines()]
+
+
+def test_reviewer_that_runs_out_of_turns_is_asked_for_its_verdict_once(tmp_path, repo, fake_bin, monkeypatch):
+    _change(repo)
+    v, calls = _review_calls(tmp_path, repo, monkeypatch, "revcap")
+    assert v["verdict"] == "pass" and not v.get("error")
+    assert len(calls) == 2
+    assert "--resume" not in calls[0]["argv"] and calls[1]["argv"][calls[1]["argv"].index("--resume") + 1] == "s1"
+    assert calls[1]["argv"][calls[1]["argv"].index("--max-turns") + 1] == "3"
+    assert "out of turns" in calls[1]["prompt"] and "JSON" in calls[1]["prompt"]
+    assert v["cost_usd"] == pytest.approx(0.7)           # the resumed total, not 0.5 + 0.7
+
+
+def test_a_reviewer_that_still_gives_no_verdict_fails_after_exactly_one_ask(tmp_path, repo, fake_bin, monkeypatch):
+    _change(repo)
+    v, calls = _review_calls(tmp_path, repo, monkeypatch, "revcap_stuck")
+    assert v["verdict"] == "block" and v["error"] is True and len(calls) == 2
+
+
+def test_a_reviewer_that_answers_normally_is_not_asked_twice(tmp_path, repo, fake_bin, monkeypatch):
+    _change(repo)
+    monkeypatch.setenv("FAKE_TEXT", '{"verdict":"pass","findings":[]}')
+    v, calls = _review_calls(tmp_path, repo, monkeypatch, "ok")
+    assert v["verdict"] == "pass" and len(calls) == 1
+
+
+def test_large_diff_gets_a_larger_turn_budget_on_the_command_line(tmp_path, repo, fake_bin, monkeypatch):
+    _change(repo, size=130_000)
+    monkeypatch.setenv("FAKE_TEXT", '{"verdict":"pass","findings":[]}')
+    _v, calls = _review_calls(tmp_path, repo, monkeypatch, "ok")
+    assert calls[0]["argv"][calls[0]["argv"].index("--max-turns") + 1] == "23"      # 10 + 130k/10k
+
+
+def test_review_error_is_marked_for_a_recovery_that_skips_the_worker(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d.move = lambda *a: None; d.comment = lambda *a: None
+    d._block(1, "review error: the reviewer produced no verdict, even when asked for one")
+    assert d.ledger.get(1)["resumable"] == 2
+
+
+def test_verify_remembers_the_commit_the_tests_passed_on(tmp_path, repo, monkeypatch):
+    from dispatcher.review import head_sha
+
+    d = _dispatcher(tmp_path, TARGET_REPO_PATH=str(repo))
+    d.ledger.upsert_claim(1, "task-1-x", "task-1-x")
+    monkeypatch.setattr(dmod, "working_tree_dirty", lambda wt: False)
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: (True, ""))
+    assert d._verify_and_remember(1, repo, "s", dmod._Run(SessionResult(), "sid")) is None
+    assert d.ledger.get(1)["tested_sha"] == head_sha(repo)
+    d.ledger.update(1, tested_sha="old")
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: (False, "FAILED x"))
+    monkeypatch.setattr(d, "_resume_step", lambda *a, **k: ("block", "stop"))
+    assert d._verify_and_remember(1, repo, "s", dmod._Run(SessionResult(), "sid")) is not None
+    assert d.ledger.get(1)["tested_sha"] == "old"                      # a failure never records a pass
+
+
+def test_review_only_recovery_skips_the_gate_when_the_commit_already_passed(pipeline, repo, monkeypatch):
+    from dispatcher.review import head_sha
+
+    d, ev = pipeline
+    _arm_resume(d, repo, monkeypatch)
+    d.ledger.update(1, resumable=2, tested_sha=head_sha(repo))
+    monkeypatch.setattr(d, "_launch", lambda *a, **k: pytest.fail("a worker was launched"))
+    monkeypatch.setattr(d, "_verify_and_remember", lambda *a, **k: pytest.fail("the gate ran again"))
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert d.ledger.get(1)["state"] == "pr_open"
+    assert any("tests already passed on this exact commit" in c for c in ev["comments"])
+
+
+def test_recovery_reruns_the_gate_if_the_commit_changed_since_it_passed(pipeline, repo, monkeypatch):
+    d, _ev = pipeline
+    _arm_resume(d, repo, monkeypatch)
+    d.ledger.update(1, resumable=2, tested_sha="some-older-commit")
+    monkeypatch.setattr(d, "_launch", lambda *a, **k: pytest.fail("a worker was launched"))
+    ran = []
+    real = d._verify_and_remember
+    monkeypatch.setattr(d, "_verify_and_remember", lambda *a, **k: ran.append(1) or real(*a, **k))
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert ran == [1] and d.ledger.get(1)["state"] == "pr_open"
+
+
+def test_a_review_failure_then_a_requeue_costs_no_worker_and_no_gate(pipeline, repo, monkeypatch):
+    """The scenario that blocked task 819: tests green, reviewer out of turns."""
+    d, ev = pipeline
+    real_review = d._review
+    monkeypatch.setattr(d, "_review", lambda *a, **k: {"verdict": "block", "error": True, "findings": [],
+                                                       "cost_usd": 0.97})
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    row = d.ledger.get(1)
+    assert row["state"] == "blocked" and row["resumable"] == 2 and row["tested_sha"]
+    assert any("only the review re-runs" in c for c in ev["comments"])
+    # the human re-queues the card
+    monkeypatch.setattr(d, "_review", real_review)
+    monkeypatch.setenv("FAKE_TEXT", '{"verdict":"pass","findings":[]}')
+    monkeypatch.setattr(d.ntree, "path", lambda s: repo)
+    for name in ("rm", "remove_branch"):
+        monkeypatch.setattr(d.ntree, name, lambda *a: pytest.fail("workspace wiped"))
+    monkeypatch.setattr(d.ntree, "new", lambda *a: pytest.fail("workspace recreated"))
+    monkeypatch.setattr(d, "_launch", lambda *a, **k: pytest.fail("a worker was launched"))
+    monkeypatch.setattr(d, "_verify_and_remember", lambda *a, **k: pytest.fail("the gate ran again"))
+    d.ledger.upsert_claim(1, "task-1-x", "task-1-x")                   # claim keeps session + flags
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert d.ledger.get(1)["state"] == "pr_open" and ev["prs"] == ["task-1-x"]
+
+
+def test_review_error_message_says_only_the_review_reruns():
+    from dispatcher.notify import next_step
+
+    text = next_step("review error: the reviewer produced no verdict", True)
+    assert "only the automated review failed" in text and "only the review re-runs" in text
