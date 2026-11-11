@@ -131,3 +131,20 @@ Block only on correctness, security, or a missed acceptance criterion.
 
 def review_prompt(spec: str, diff: str) -> str:
     return REVIEW_INSTRUCTION.format(spec=spec, diff=diff)
+
+
+def continue_prompt() -> str:
+    """Sent when a worker is resumed after running out of turns (same session, fresh turns)."""
+    return (
+        "You ran out of turns before you finished, but everything you did is still in this "
+        "workspace: check `git status` and `git diff`. Do NOT start over and do not redo work "
+        "that is already done. Finish the remaining acceptance criteria, run the test command, "
+        "commit all your changes, and stop. If nothing remains, just make sure everything is "
+        "committed. Do not push and do not open a PR."
+    )
+
+
+FRESH_SESSION_NOTE = (
+    "\n\nNOTE: a previous attempt at this task already made changes in this workspace "
+    "(see `git status` and `git diff`). Build on them; do not start over."
+)

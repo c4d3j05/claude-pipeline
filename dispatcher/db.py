@@ -74,6 +74,8 @@ class Ledger:
 
     def _migrate(self) -> None:
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(tasks)")}
+        if "resumable" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN resumable INTEGER NOT NULL DEFAULT 0")
         if "pr_status" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN pr_status TEXT")
         if "lifetime_cost" not in cols:

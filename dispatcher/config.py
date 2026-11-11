@@ -92,6 +92,8 @@ class Config:
     gate_timeout_min: int = 30
     # Transient API/network failures are retried before a task is blocked.
     transient_retries: int = 2
+    # A worker that hits the turn cap with work in progress is resumed this many times.
+    max_continuations: int = 2
     # Run the gate once per base commit before spending on a worker (red base = env problem).
     baseline_check: bool = True
 
@@ -153,6 +155,7 @@ def load(env_file: str | None = ".env") -> Config:
         max_gates=max(1, _int(src, "MAX_GATES", 1)),
         gate_timeout_min=_int(src, "GATE_TIMEOUT_MIN", 30),
         transient_retries=_int(src, "TRANSIENT_RETRIES", 2),
+        max_continuations=_int(src, "MAX_CONTINUATIONS", 2),
         baseline_check=_str(src, "BASELINE_CHECK", "true").lower() not in ("0", "false", "no", "off"),
         db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),
