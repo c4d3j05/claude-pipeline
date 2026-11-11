@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as cfgmod
+from . import infra
 from . import pr as prmod
 from .cleanup import process_closed_prs, sync_deleted_tasks, watch_open_prs
 from .config import Config
@@ -33,7 +34,7 @@ from .prompt import (
     worker_prompt,
 )
 from .review import GateTimeout, adversarial_review, has_work, run_tests, working_tree_dirty
-from .stream import SessionResult, blocked_reason
+from .stream import SessionResult, blocked_reason, parse_lines
 from .vikunja import Vikunja
 from .worker import launch
 
@@ -65,6 +66,8 @@ _AUTH = re.compile(
 TICK_FAILURES_BEFORE_ALERT = 3
 # Blocks that leave a worker's progress in the workspace: a re-queue resumes instead of wiping.
 _RESUMABLE = ("cap: turns", "cap: wall-clock", "cap: task cost")
+# Blocks where the worker's job was already done: a re-queue only re-runs the gates.
+_GATES_ONLY = ("environment:",)
 
 POOL_CEILING = 32  # hard cap on threads; live concurrency is gated by cfg.max_workers
 
@@ -412,12 +415,18 @@ class Dispatcher:
         if not self.cfg.baseline_check:
             return None
         sha = self.ntree.rev(base_ref) or base_ref
+        boot = infra.boot_id()
         try:
             with self._baseline_lock:  # single-flight: concurrent tasks reuse the result
-                row = self.ledger.get_baseline(sha)
+                row = self.ledger.get_baseline(sha, boot)
                 if row is None:
                     green, tail = self._gate(slug)
-                    self.ledger.set_baseline(sha, green, tail)
+                    problem = None if green else infra.detect(tail)
+                    if problem:
+                        # A down service says nothing about the base commit: don't cache it.
+                        return ("block", (f"environment: {problem.summary}. Start it and re-queue; "
+                                          f"no work was started.\n{tail[-400:]}"))
+                    self.ledger.set_baseline(sha, green, tail, boot)
                 else:
                     green, tail = bool(row["green"]), row["tail"]
         except GateTimeout as e:
@@ -437,11 +446,24 @@ class Dispatcher:
         cfg = self.cfg
         self.ledger.update(tid, state="testing")
         settled = False
+        rerun_done = False   # one free re-run of the gate for a service that came back
         while True:
             if self.ledger.cancel_requested(tid):
                 return ("cancel", "")
             green, tail = self._gate(slug)
             while not green:
+                problem = infra.detect(tail)
+                if problem:
+                    # The gate could not reach a service. Resuming the worker cannot fix that
+                    # (it is usually unable to start services) and just burns budget.
+                    if problem.reachable() is not False and not rerun_done:
+                        rerun_done = True
+                        self.comment(tid, f"gate: {problem.summary}, but it answers now - "
+                                          f"re-running the gate without using a retry")
+                        green, tail = self._gate(slug)
+                        continue
+                    return ("block", (f"environment: {problem.summary}. Start it, then re-queue: "
+                                      f"the work is saved and only the gates re-run.\n{tail[-400:]}"))
                 row = self.ledger.get(tid)
                 if row["test_retries"] >= cfg.max_test_retries:
                     return ("block", "gate: tests red")
@@ -482,6 +504,14 @@ class Dispatcher:
             return None
         return wt
 
+    def _summary_from_log(self, slug: str) -> SessionResult:
+        """The worker's last reported result, read back from its session log."""
+        try:
+            lines = (self._session_log(slug, "session.jsonl")).read_text(errors="ignore").splitlines()
+        except OSError:
+            return SessionResult()
+        return parse_lines(lines)
+
     def _worth_continuing(self, tid: int, worktree: Path, base_ref: str) -> bool:
         """Resume a turn-capped worker only if it produced something and budget remains."""
         return (not self.ledger.cancel_requested(tid)
@@ -496,11 +526,18 @@ class Dispatcher:
 
         base_ref = self.ntree.base_ref()   # fetched, so workers never fork from a stale main
         resume_wt = self._resume_workspace(tid, slug, base_ref)
+        row0 = self.ledger.get(tid)
+        # resumable == 2: blocked by the environment after the worker had finished, so only
+        # the gates need to run again - no point paying for a worker session.
+        gates_only = bool(resume_wt and row0 and row0["resumable"] == 2)
         if resume_wt:
-            # Blocked on a cap with work in progress: keep the workspace and its session.
+            # Blocked mid-work (cap) or by the environment: keep the workspace and session.
             worktree = resume_wt
-            log.info("task %s: resuming the existing workspace and session", tid)
-            self.comment(tid, "resuming the previous session in the existing workspace "
+            log.info("task %s: resuming the existing workspace%s", tid,
+                     " (gates only)" if gates_only else " and session")
+            self.comment(tid, "re-running the test gates on the finished work (the environment "
+                              "problem is fixed; no worker session needed)" if gates_only else
+                              "resuming the previous session in the existing workspace "
                               "(no restart from scratch)")
         else:
             # Start pristine. A leftover worktree AND its branch from a prior run would
@@ -522,7 +559,12 @@ class Dispatcher:
 
         # First worker attempt (or resume of the interrupted one)
         task_prompt = worker_prompt(tid, title, desc, slug)
-        if resume_wt:
+        if gates_only:
+            sid = row0["session_id"] or ""
+            result = self._summary_from_log(slug)       # the worker's last summary, for the PR
+            run = _Run(result=result, session_id=sid)
+            stop = None
+        elif resume_wt:
             sid = self.ledger.get(tid)["session_id"]
             result, rc = self._launch(tid, worktree, slug, continue_prompt(), "session.jsonl", sid)
             if rc != 0 and "no conversation found" in f"{result.result_text} {result.last_message}".lower():
@@ -532,9 +574,11 @@ class Dispatcher:
                                           "session.jsonl")
         else:
             result, rc = self._launch(tid, worktree, slug, task_prompt, "session.jsonl")
-        self.comment(tid, f"dispatched: session={result.session_id} pid={os.getpid()} workspace={slug}")
-        run = _Run(result=result, session_id=result.session_id)
-        stop = self._stop_reason(tid, result, rc)
+        if not gates_only:
+            self.comment(tid, f"dispatched: session={result.session_id} pid={os.getpid()} "
+                              f"workspace={slug}")
+            run = _Run(result=result, session_id=result.session_id)
+            stop = self._stop_reason(tid, result, rc)
         # Out of turns but making progress: resume the same session (bounded) instead of
         # discarding the work. Stuck workers (no changes) and over-budget tasks still block.
         continuations = 0
@@ -619,7 +663,9 @@ class Dispatcher:
 
     def _block(self, task_id: int, reason: str) -> None:
         log.warning("task %s blocked: %s", task_id, reason)
-        if reason.startswith(_RESUMABLE):
+        if reason.startswith(_GATES_ONLY):
+            self.ledger.update(task_id, resumable=2)    # resume at the gates, skip the worker
+        elif reason.startswith(_RESUMABLE):
             self.ledger.update(task_id, resumable=1)
         try:
             self.move(task_id, "blocked")

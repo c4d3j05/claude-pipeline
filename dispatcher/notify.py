@@ -23,6 +23,10 @@ RESTART_HINT = ("Drag the card back to Ready (or press r in the dashboard) to re
 
 def next_step(reason: str, resumable: bool) -> str:
     """What the human should do about a blocked task (used in Slack and on the card)."""
+    if reason.startswith("environment"):
+        return ("The code is not the problem: a service the tests need is down. Start it, then "
+                "drag the card back to Ready (or press r in the dashboard). The work is saved "
+                "and only the test gates are re-run.")
     if resumable:
         return RESUME_HINT
     if reason.startswith("baseline"):
