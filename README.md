@@ -1,7 +1,7 @@
 # claude-pipeline
 
 Turn a Vikunja task marked **ready** into a reviewed pull request without anyone at
-a terminal. One Claude Code worker per task, N tasks in parallel on one Mac, each in
+a terminal. One Claude Code worker per task, N tasks in parallel on one machine (macOS or Linux), each in
 its own [ntree](https://github.com/c4d3j05/ntree) git worktree with its own ports and
 database namespace.
 
@@ -61,8 +61,17 @@ The target repo's Vikunja project needs a **Kanban** view with buckets named
 
 ```bash
 uv run claude-pipeline run                # foreground
-./scripts/install.sh                      # or: install launchd agents (daemon + nightly 03:00)
+./scripts/install.sh                      # or: install as a service (daemon + nightly 03:00)
+                                          #   macOS → launchd agents, Linux → systemd --user units
 ```
+
+### Linux (Debian/Ubuntu)
+
+Needs `git`, `gh`, `jq`, `lsof`, `netcat-openbsd`, `uv`, the `claude` CLI, and a Linux-capable
+[ntree](https://github.com/c4d3j05/ntree) (branch `feature/linux-support` or later).
+`scripts/install.sh` installs `systemd --user` units from `systemd/`. User services stop at
+logout unless you run `sudo loginctl enable-linger $USER`. Logs: `journalctl --user -u
+claude-pipeline-dispatcher -f` or `logs/dispatcher.err.log`.
 
 ## Commands
 

@@ -13,7 +13,9 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import json
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from .config import Config
@@ -123,7 +125,9 @@ def request_cancel(ledger: Ledger, task_id: int) -> None:
 
 def open_pr(pr_url: str) -> None:
     if pr_url:
-        subprocess.run(["open", pr_url], capture_output=True)
+        opener = "open" if sys.platform == "darwin" else shutil.which("xdg-open")
+        if opener:
+            subprocess.run([opener, pr_url], capture_output=True)
 
 
 def retry_task(cfg: Config, ledger: Ledger, task_id: int) -> str:
