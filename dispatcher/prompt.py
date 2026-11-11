@@ -26,22 +26,38 @@ def task_slug(task_id: int, title: str) -> str:
     return f"task-{task_id}-{slugify(title)}"
 
 
+_SOURCE_LINE = re.compile(r"^source:\s", re.IGNORECASE)
+
+
+def _mark_headings(text: str) -> str:
+    """Turn HTML headings into Markdown `#` lines so they survive tag stripping."""
+    return re.sub(r"<h([1-6])[^>]*>(.*?)</h\1>",
+                  lambda m: f"\n{'#' * int(m.group(1))} {m.group(2)}\n",
+                  text or "", flags=re.IGNORECASE | re.DOTALL)
+
+
 def acceptance_criteria(description_html: str) -> list[str]:
-    """Best-effort pull of the Definition of Done / acceptance checklist items."""
-    text = _strip_html(description_html)
+    """Best-effort pull of the Definition of Done / acceptance checklist items.
+
+    The section runs from its heading to the next heading (HTML `<hN>` or Markdown `#`), a short
+    line ending in a colon (older hand-written tasks), or a `Source:` provenance line (written by
+    claude-planner after the checklist). Anything after that is not a criterion.
+    """
+    text = _strip_html(_mark_headings(description_html))
     lines = [ln.strip("-• \t") for ln in text.splitlines()]
-    # Prefer items under a "Definition of Done" / "Acceptance" heading.
     items: list[str] = []
     capture = False
     for ln in lines:
         low = ln.lower()
-        if any(h in low for h in ("definition of done", "acceptance criteria")):
+        if not capture and any(h in low for h in ("definition of done", "acceptance criteria")):
             capture = True
             continue
         if capture:
             if not ln:
                 continue
-            if ln.endswith(":") and len(ln) < 40:  # a new heading ends the section
+            if ln.startswith("#") or _SOURCE_LINE.match(ln):
+                break
+            if ln.endswith(":") and len(ln) < 40:  # a short heading-like line ends the section
                 break
             items.append(ln)
     return [i for i in items if i]
