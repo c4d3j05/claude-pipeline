@@ -83,6 +83,7 @@ class Ledger:
                    ON CONFLICT(task_id) DO UPDATE SET
                        slug=excluded.slug, branch=excluded.branch,
                        state='claimed', updated_at=excluded.updated_at,
+                       started_at=excluded.started_at,
                        -- a re-queued task is a fresh attempt: fresh budget and retries
                        test_retries=0, review_retries=0, cost_usd=0,
                        cancel_requested=0, pruned=0, pid=NULL, pr_url=NULL""",

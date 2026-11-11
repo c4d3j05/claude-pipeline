@@ -47,6 +47,24 @@ def diff_against_base(worktree: Path, base: str) -> str:
     return cp.stdout
 
 
+def review_settings(cfg: Config, worktree: Path, session_log: Path) -> str:
+    """Settings for the reviewer: the repo's worker settings minus hooks.
+
+    The reviewer is read-only; the Stop hook would run the whole test gate every time the
+    reviewer stops. Returns an absolute path (the original is relative to the worktree).
+    """
+    src = worktree / cfg.settings_file
+    try:
+        data = json.loads(src.read_text())
+    except (OSError, ValueError):
+        return cfg.settings_file  # unreadable: fall back, the hook failing is harmless
+    data.pop("hooks", None)
+    dest = session_log.parent / "review-settings.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(data, indent=2))
+    return str(dest.resolve())
+
+
 def adversarial_review(
     cfg: Config, worktree: Path, spec: str, session_log: Path, base_ref: str | None = None
 ) -> dict:
@@ -69,7 +87,7 @@ def adversarial_review(
     result, rc = launch(
         worktree=worktree,
         prompt=review_prompt(spec, shown),
-        settings_file=cfg.settings_file,
+        settings_file=review_settings(cfg, worktree, session_log),
         session_log=session_log,
         max_turns=8,
         wall_clock_limit_min=15,
