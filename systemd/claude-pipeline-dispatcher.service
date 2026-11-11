@@ -1,0 +1,20 @@
+# Installed to ~/.config/systemd/user by scripts/install.sh (placeholders substituted).
+[Unit]
+Description=claude-pipeline dispatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PIPELINE_DIR__
+Environment=PATH=__PATH__
+ExecStart=__UV__ run claude-pipeline run
+Restart=always
+RestartSec=5
+# SIGTERM the dispatcher only; workers run in their own sessions and are reaped by its handler.
+KillMode=mixed
+StandardOutput=append:__PIPELINE_DIR__/logs/dispatcher.out.log
+StandardError=append:__PIPELINE_DIR__/logs/dispatcher.err.log
+
+[Install]
+WantedBy=default.target

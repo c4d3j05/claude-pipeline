@@ -1,0 +1,11 @@
+# Installed to ~/.config/systemd/user by scripts/install.sh (placeholders substituted).
+[Unit]
+Description=claude-pipeline nightly maintenance
+
+[Service]
+Type=oneshot
+WorkingDirectory=__PIPELINE_DIR__
+Environment=PATH=__PATH__
+ExecStart=__UV__ run claude-pipeline nightly
+StandardOutput=append:__PIPELINE_DIR__/logs/nightly.out.log
+StandardError=append:__PIPELINE_DIR__/logs/nightly.err.log

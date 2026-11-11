@@ -1,0 +1,10 @@
+# Nightly maintenance at 03:00 (spec Cleanup).
+[Unit]
+Description=claude-pipeline nightly maintenance at 03:00
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
