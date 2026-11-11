@@ -30,6 +30,49 @@ def test_acceptance_criteria_extraction():
     assert "Wrong password returns 401" in crit
 
 
+PLANNER_DESC = (
+    "### Purpose\nFeature: why it exists\n\n### Contract\n1. open the screen\n\n"
+    "### Dependencies\nnone\n\n### Reference\n- app/x.py\n\n"
+    "### Definition of Done\n- [ ] saving works\n- [ ] A test asserts the behaviour.\n\n"
+    "Source: https://x.slack.com/archives/D1/p10 · investigation ab12 · ticket a"
+)
+
+
+def test_criteria_from_a_planner_description_exclude_the_source_line():
+    assert prompt.acceptance_criteria(PLANNER_DESC) == [
+        "[ ] saving works", "[ ] A test asserts the behaviour."]
+
+
+def test_markdown_section_after_definition_of_done_is_not_a_criterion():
+    desc = "### Definition of Done\n- [ ] one\n- [ ] two\n\n### Reference\n- app/x.py\n- app/y.py"
+    assert prompt.acceptance_criteria(desc) == ["[ ] one", "[ ] two"]
+
+
+def test_html_section_after_definition_of_done_is_not_a_criterion():
+    desc = ("<h3>Definition of Done</h3><ul><li>one</li><li>two</li></ul>"
+            "<h3>Reference</h3><ul><li>app/x.py</li></ul>")
+    assert prompt.acceptance_criteria(desc) == ["one", "two"]
+
+
+def test_older_colon_headings_still_end_the_section():
+    desc = "Definition of Done\n- one\n- two\nNotes:\n- not a criterion"
+    assert prompt.acceptance_criteria(desc) == ["one", "two"]
+
+
+def test_a_description_with_the_checklist_last_and_no_trailing_text_is_unchanged():
+    desc = "<h3>Purpose</h3><p>x</p><h3>Acceptance criteria</h3><ul><li>a</li><li>b</li></ul>"
+    assert prompt.acceptance_criteria(desc) == ["a", "b"]
+
+
+def test_a_criterion_that_mentions_the_heading_words_is_kept():
+    desc = "### Definition of Done\n- the definition of done is shown on the card\n- second"
+    assert prompt.acceptance_criteria(desc) == ["the definition of done is shown on the card", "second"]
+
+
+def test_no_definition_of_done_gives_no_criteria():
+    assert prompt.acceptance_criteria("### Purpose\nsomething\n\nSource: https://x") == []
+
+
 def test_worker_prompt_contains_rules():
     p = prompt.worker_prompt(7, "Do X", "<p>details</p>", "task-7-do-x")
     assert "Do NOT push" in p
