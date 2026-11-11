@@ -137,3 +137,16 @@ class Vikunja:
         except VikunjaError as e:
             # Already-applied is fine.
             log.debug("apply_label(%s) ignored: %s", task_id, e)
+
+
+def open_blockers(task: dict) -> list[int]:
+    """Ids of the tasks this one waits for that are not done yet.
+
+    A Vikunja `blocked` relation lives on the dependent task as
+    `related_tasks["blocked"] = [{"id", "done", ...}]`; the board payload the dispatcher already
+    fetches carries it, and `done` follows the blocker (it flips when the blocker's PR merges and
+    its card reaches the Done bucket). A relation entry without a `done` flag counts as open: when
+    unsure, do not start the dependent.
+    """
+    rel = (task.get("related_tasks") or {}).get("blocked") or []
+    return [r["id"] for r in rel if not r.get("done")]

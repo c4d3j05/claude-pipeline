@@ -276,6 +276,68 @@ def test_ready_tasks_claim_guard(tmp_path, state, marker, expected):
     assert len(d.ready_tasks(limit=5)) == expected
 
 
+# --- blocked relations ------------------------------------------------------------
+class _Board(_VK):
+    """A Ready column with the given tasks; each is claude-labelled."""
+
+    def __init__(self, tasks):
+        super().__init__(False)
+        self.tasks = tasks
+
+    def board(self, *_):
+        return [{"title": "Ready", "tasks": self.tasks}]
+
+
+def _task(tid, *blockers, blocking=()):
+    rel = {}
+    if blockers:
+        rel["blocked"] = [{"id": b, "done": done} for b, done in blockers]
+    if blocking:
+        rel["blocking"] = [{"id": b, "done": False} for b in blocking]
+    return {"id": tid, "done": False, "labels": [{"title": "claude"}], "related_tasks": rel}
+
+
+def test_open_blockers_reads_only_unfinished_blocked_relations():
+    from dispatcher.vikunja import open_blockers
+    assert open_blockers({}) == []
+    assert open_blockers({"related_tasks": None}) == []
+    assert open_blockers(_task(1, (2, False), (3, True))) == [2]
+    assert open_blockers(_task(1, (2, True))) == []
+    assert open_blockers(_task(1, blocking=[9])) == []            # blocking others is not waiting
+    assert open_blockers({"related_tasks": {"blocked": [{"id": 4}]}}) == [4]   # unknown -> open
+    assert open_blockers({"related_tasks": {"subtask": [{"id": 5, "done": False}]}}) == []
+
+
+def test_a_task_waiting_on_an_unfinished_blocker_is_not_claimed(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.vk = _Board([_task(2, (1, False)), _task(1, blocking=[2])])
+    assert [t["id"] for t in d.ready_tasks(limit=5)] == [1]        # only the blocker is claimable
+
+
+def test_it_is_claimed_on_the_first_poll_after_its_last_blocker_is_done(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.vk = _Board([_task(3, (1, True), (2, False))])
+    assert d.ready_tasks(limit=5) == []                            # one blocker still open
+    d.vk = _Board([_task(3, (1, True), (2, True))])
+    assert [t["id"] for t in d.ready_tasks(limit=5)] == [3]
+
+
+def test_a_blocked_task_does_not_use_up_the_claim_limit(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.vk = _Board([_task(2, (1, False)), _task(4, (1, False)), _task(5)])
+    assert [t["id"] for t in d.ready_tasks(limit=1)] == [5]
+
+
+def test_waiting_is_logged_once_per_change_not_every_poll(tmp_path, caplog):
+    import logging
+    d = _dispatcher(tmp_path)
+    d.vk = _Board([_task(2, (1, False))])
+    with caplog.at_level(logging.INFO):
+        for _ in range(3):
+            d.ready_tasks(limit=5)
+    assert sum("waits for" in r.message for r in caplog.records) == 1
+
+
 def test_reap_orphans_moves_card_and_never_kills_non_claude_pid(tmp_path, monkeypatch):
     d = _dispatcher(tmp_path)
     d.ledger.upsert_claim(1, "s", "s")
