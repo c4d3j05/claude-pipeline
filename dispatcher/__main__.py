@@ -50,7 +50,7 @@ def cmd_dashboard(args) -> int:
         from .dashboard import snapshot_text
         from .db import Ledger
 
-        print(snapshot_text(cfg, Ledger(cfg.db_path)))
+        print(snapshot_text(cfg, Ledger(cfg.db_path), state=args.state))
         return 0
     from . import dashboard
 
@@ -188,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("sync", help="forget tasks whose Vikunja ticket was deleted").set_defaults(func=cmd_sync)
     dash = sub.add_parser("dashboard", help="terminal control panel (status + config + controls)")
     dash.add_argument("--once", action="store_true", help="print a one-shot text status and exit (no TUI)")
+    dash.add_argument("--state", default="all", choices=["all", "active", "blocked", "pr_open", "done"],
+                      help="with --once: only show tasks in this state group")
     dash.set_defaults(func=cmd_dashboard)
     pr = sub.add_parser("prepare-repo", help="install worker-settings.json + CLAUDE.md into target repo")
     pr.add_argument("--force", action="store_true", help="overwrite an existing CLAUDE.md")

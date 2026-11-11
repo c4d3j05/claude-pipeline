@@ -25,6 +25,23 @@ from .vikunja import Vikunja
 _PIPELINE_PREFIXES = ("dispatched:", "gate:", "blocked:", "pr:", "cap:")
 
 
+# --- filtering ------------------------------------------------------------
+# name -> ledger states shown. Order is the order the TUI's `f` key cycles through.
+FILTERS: dict[str, tuple[str, ...] | None] = {
+    "all": None,
+    "active": ACTIVE_STATES,            # claimed / working / testing / reviewing
+    "blocked": ("blocked",),            # needs a human decision
+    "pr_open": ("pr_open",),            # waiting for a human to review/merge
+    "done": ("done",),
+}
+
+
+def filter_tasks(tasks: list[dict], name: str = "all") -> list[dict]:
+    """Keep only the tasks whose state belongs to the named filter."""
+    states = FILTERS.get(name)
+    return list(tasks) if states is None else [t for t in tasks if t["state"] in states]
+
+
 # --- data gathering -----------------------------------------------------
 def _elapsed(started_at: str | None) -> str:
     if not started_at:
@@ -92,17 +109,22 @@ def gather_status(cfg: Config, ledger: Ledger, logs_root: Path = Path("logs")) -
     }
 
 
-def snapshot_text(cfg: Config, ledger: Ledger, logs_root: Path = Path("logs")) -> str:
+def snapshot_text(cfg: Config, ledger: Ledger, logs_root: Path = Path("logs"),
+                  state: str = "all") -> str:
     """Plain-text one-shot status (used by `dashboard --once`; no Textual needed)."""
     st = gather_status(cfg, ledger, logs_root)
+    total = len(st["tasks"])
+    st["tasks"] = filter_tasks(st["tasks"], state)
     header = (
         f"workers {st['active']}/{st['max_workers']}  |  "
         f"today ${st['today_cost']:.2f}/${st['cap']:.0f}  |  "
         f"{'PAUSED' if st['paused'] else 'running'}"
     )
     lines = [header, "-" * len(header)]
+    if state != "all":
+        lines.insert(1, f"filter: {state} ({len(st['tasks'])} of {total})")
     if not st["tasks"]:
-        lines.append("(no tasks yet)")
+        lines.append("(no tasks yet)" if state == "all" else f"(no {state} tasks)")
     for t in st["tasks"]:
         pr = t["pr_url"].rsplit("/", 1)[-1] if t["pr_url"] else ""
         lines.append(

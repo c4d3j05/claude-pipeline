@@ -81,6 +81,7 @@ class DashboardApp(App):
         Binding("r", "retry", "Retry"),
         Binding("c", "cancel", "Cancel"),
         Binding("o", "open_pr", "Open PR"),
+        Binding("f", "filter", "Filter"),
         Binding("s", "sync", "Sync deleted"),
         Binding("e", "config", "Config"),
     ]
@@ -92,6 +93,7 @@ class DashboardApp(App):
         self.ledger = Ledger(cfg.db_path)
         self.logs_root = Path("logs")
         self._row_ids: list[int] = []
+        self._filter = 0   # index into dash.FILTERS
 
     def compose(self) -> ComposeResult:
         yield Static("", id="summary")
@@ -111,12 +113,17 @@ class DashboardApp(App):
         self.cfg = cfgmod.load(self.env_file)
         st = dash.gather_status(self.cfg, self.ledger, self.logs_root)
 
+        fname = list(dash.FILTERS)[self._filter]
+        total = len(st["tasks"])
+        st["tasks"] = dash.filter_tasks(st["tasks"], fname)
+        flt = (f"   filter: [b yellow]{fname}[/] ({len(st['tasks'])} of {total})"
+               if fname != "all" else "")
         pause = "[b red]PAUSED[/]" if st["paused"] else "[b green]running[/]"
         cap_color = "red" if st["today_cost"] >= st["cap"] else "white"
         self.query_one("#summary", Static).update(
             f"[b]claude-pipeline[/]   workers [b]{st['active']}/{st['max_workers']}[/]   "
-            f"spend [{cap_color}]${st['today_cost']:.2f}[/]/${st['cap']:.0f} today   {pause}\n"
-            f"[dim]p pause · r retry · c cancel · o open PR · s sync deleted · e config · q quit[/]"
+            f"spend [{cap_color}]${st['today_cost']:.2f}[/]/${st['cap']:.0f} today   {pause}{flt}\n"
+            f"[dim]f filter · p pause · r retry · c cancel · o open PR · s sync deleted · e config · q quit[/]"
         )
 
         table = self.query_one("#tasks", DataTable)
@@ -187,6 +194,11 @@ class DashboardApp(App):
             self.notify(f"Task {tid}: {msg}")
         except Exception as e:  # noqa: BLE001
             self.notify(f"Retry failed: {e}", severity="error")
+        self.refresh_data()
+
+    def action_filter(self) -> None:
+        """Cycle: all -> active -> blocked -> pr_open -> done -> all."""
+        self._filter = (self._filter + 1) % len(dash.FILTERS)
         self.refresh_data()
 
     def action_sync(self) -> None:

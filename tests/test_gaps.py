@@ -1256,3 +1256,78 @@ def test_dashboard_sync_reports_what_it_removed(tmp_path, monkeypatch):
     assert dashboard.sync_deleted(_cfg(tmp_path), led) == "removed #7, #9"
     monkeypatch.setattr(cleanup, "sync_deleted_tasks", lambda *a, **k: [])
     assert dashboard.sync_deleted(_cfg(tmp_path), led) == "nothing to remove"
+
+
+# =====================================================================================
+# Filtering the task list
+# =====================================================================================
+def _mixed(tmp_path, db="l.db"):
+    led = Ledger(tmp_path / db)
+    for tid, state in [(1, "blocked"), (2, "done"), (3, "working"), (4, "blocked"),
+                       (5, "pr_open"), (6, "testing"), (7, "claimed"), (8, "reviewing")]:
+        _row(led, tid, state)
+    return led
+
+
+def test_filter_groups_tasks_by_what_a_human_cares_about(tmp_path):
+    from dispatcher import dashboard
+
+    tasks = dashboard.gather_status(_cfg(tmp_path), _mixed(tmp_path), tmp_path / "logs")["tasks"]
+    ids = lambda name: sorted(t["task_id"] for t in dashboard.filter_tasks(tasks, name))
+    assert ids("all") == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert ids("active") == [3, 6, 7, 8]          # claimed / working / testing / reviewing
+    assert ids("blocked") == [1, 4]               # needs a decision
+    assert ids("pr_open") == [5]                  # waiting for review/merge
+    assert ids("done") == [2]
+    assert ids("nonsense") == [1, 2, 3, 4, 5, 6, 7, 8]   # unknown name never hides anything
+
+
+def test_snapshot_text_filter_shows_the_count_and_an_empty_message(tmp_path):
+    from dispatcher import dashboard
+
+    led = _mixed(tmp_path)
+    out = dashboard.snapshot_text(_cfg(tmp_path), led, tmp_path / "logs", state="blocked")
+    assert "filter: blocked (2 of 8)" in out
+    assert "    1  blocked" in out and "    4  blocked" in out and "    2  done" not in out
+    assert "filter:" not in dashboard.snapshot_text(_cfg(tmp_path), led, tmp_path / "logs")
+    led2 = Ledger(tmp_path / "other.db"); _row(led2, 1, "done")
+    assert "(no blocked tasks)" in dashboard.snapshot_text(_cfg(tmp_path), led2, tmp_path / "logs", state="blocked")
+
+
+def test_tui_f_key_cycles_the_filter_and_selection_follows_the_visible_rows(tmp_path):
+    import asyncio
+
+    pytest.importorskip("textual")
+    from textual.widgets import DataTable
+
+    from dispatcher.tui import DashboardApp
+
+    led = _mixed(tmp_path, db="p.db")                    # the DB file _cfg() points the app at
+    led.conn.close()                                     # the app opens its own ledger connection
+
+    async def run():
+        app = DashboardApp(_cfg(tmp_path), str(tmp_path / ".env"))
+        async with app.run_test(size=(120, 24)) as pilot:
+            await pilot.pause(0.3)
+            table = app.query_one("#tasks", DataTable)
+            seen = {"all": len(app._row_ids)}
+            for name in ("active", "blocked", "pr_open", "done"):
+                await pilot.press("f")
+                await pilot.pause(0.2)
+                seen[name] = sorted(app._row_ids)
+            await pilot.press("f")                       # wraps back to all
+            await pilot.pause(0.2)
+            seen["wrapped"] = len(app._row_ids)
+            # in the blocked view, row 1 must be task 4 - retry/cancel act on THIS mapping
+            for _ in range(2):                           # all -> active -> blocked
+                await pilot.press("f")
+                await pilot.pause(0.2)
+            table.move_cursor(row=1)
+            await pilot.pause(0.1)
+            seen["selected_in_blocked"] = app._selected()["task_id"]
+        return seen
+    seen = asyncio.run(run())
+    assert seen["all"] == 8 and seen["wrapped"] == 8
+    assert seen["active"] == [3, 6, 7, 8] and seen["blocked"] == [1, 4]
+    assert seen["pr_open"] == [5] and seen["done"] == [2]
+    assert seen["selected_in_blocked"] == 4
