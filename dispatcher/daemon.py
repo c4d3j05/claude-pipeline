@@ -24,13 +24,15 @@ from .ntree import Ntree, NtreeError
 from .proc import kill_group
 from .procenv import load_env_file
 from .prompt import (
+    FRESH_SESSION_NOTE,
     commit_or_discard_prompt,
+    continue_prompt,
     retry_prompt_review,
     retry_prompt_tests,
     task_slug,
     worker_prompt,
 )
-from .review import GateTimeout, adversarial_review, run_tests, working_tree_dirty
+from .review import GateTimeout, adversarial_review, has_work, run_tests, working_tree_dirty
 from .stream import SessionResult, blocked_reason
 from .vikunja import Vikunja
 from .worker import launch
@@ -61,6 +63,8 @@ _AUTH = re.compile(
     r"not logged in|please run /login|invalid api key|authentication|unauthori[sz]ed|"
     r"oauth token|credit balance|\b401\b", re.IGNORECASE)
 TICK_FAILURES_BEFORE_ALERT = 3
+# Blocks that leave a worker's progress in the workspace: a re-queue resumes instead of wiping.
+_RESUMABLE = ("cap: turns", "cap: wall-clock", "cap: task cost")
 
 POOL_CEILING = 32  # hard cap on threads; live concurrency is gated by cfg.max_workers
 
@@ -445,36 +449,82 @@ class Dispatcher:
         self.ledger.add_cost(tid, review.get("cost_usd", 0.0))  # review spend counts too
         return review
 
+    def _resume_workspace(self, tid: int, slug: str, base_ref: str) -> Path | None:
+        """The existing workspace if this task was blocked mid-work and can be resumed."""
+        row = self.ledger.get(tid)
+        if not row or not row["resumable"] or not row["session_id"]:
+            return None
+        try:
+            wt = self.ntree.path(slug)
+        except NtreeError:
+            return None
+        if not wt.exists() or not has_work(wt, base_ref):
+            return None
+        return wt
+
+    def _worth_continuing(self, tid: int, worktree: Path, base_ref: str) -> bool:
+        """Resume a turn-capped worker only if it produced something and budget remains."""
+        return (not self.ledger.cancel_requested(tid)
+                and self._over_task_budget(tid) is None
+                and has_work(worktree, base_ref))
+
     def run_pipeline(self, task: dict, slug: str) -> None:
         tid = task["id"]
         title = task.get("title", f"task-{tid}")
         desc = task.get("description", "") or ""
         cfg = self.cfg
 
-        # Workspace: start pristine. A leftover worktree AND its branch from a
-        # prior/blocked run would otherwise be reused stale (ntree new is a no-op
-        # if the workspace exists, and reuses the old branch off a stale base).
         base_ref = self.ntree.base_ref()   # fetched, so workers never fork from a stale main
-        self.ntree.rm(slug)
-        self.ntree.remove_branch(slug)
-        worktree = self.ntree.new(slug, base_ref)
-        self.ledger.update(tid, state="working", workspace=slug)
+        resume_wt = self._resume_workspace(tid, slug, base_ref)
+        if resume_wt:
+            # Blocked on a cap with work in progress: keep the workspace and its session.
+            worktree = resume_wt
+            log.info("task %s: resuming the existing workspace and session", tid)
+            self.comment(tid, "resuming the previous session in the existing workspace "
+                              "(no restart from scratch)")
+        else:
+            # Start pristine. A leftover worktree AND its branch from a prior run would
+            # otherwise be reused stale (ntree new is a no-op if the workspace exists).
+            self.ntree.rm(slug)
+            self.ntree.remove_branch(slug)
+            worktree = self.ntree.new(slug, base_ref)
+        self.ledger.update(tid, state="working", workspace=slug, resumable=0)
 
         # A cancel requested during setup (minutes of installs) must not cost a worker run.
         if self.ledger.cancel_requested(tid):
             return self._cancelled(tid, slug)
-        stop = self._baseline(tid, worktree, slug, base_ref)
-        if stop:
-            return self._halt(tid, slug, stop)
+        if not resume_wt:  # a resumed workspace is not pristine; the base was checked before
+            stop = self._baseline(tid, worktree, slug, base_ref)
+            if stop:
+                return self._halt(tid, slug, stop)
         if self.ledger.cancel_requested(tid):
             return self._cancelled(tid, slug)
 
-        # First worker attempt
-        result, rc = self._launch(tid, worktree, slug, worker_prompt(tid, title, desc, slug),
-                                  "session.jsonl")
+        # First worker attempt (or resume of the interrupted one)
+        task_prompt = worker_prompt(tid, title, desc, slug)
+        if resume_wt:
+            sid = self.ledger.get(tid)["session_id"]
+            result, rc = self._launch(tid, worktree, slug, continue_prompt(), "session.jsonl", sid)
+            if rc != 0 and "no conversation found" in f"{result.result_text} {result.last_message}".lower():
+                log.warning("task %s: session %s cannot be resumed; fresh session on the same files",
+                            tid, sid)
+                result, rc = self._launch(tid, worktree, slug, task_prompt + FRESH_SESSION_NOTE,
+                                          "session.jsonl")
+        else:
+            result, rc = self._launch(tid, worktree, slug, task_prompt, "session.jsonl")
         self.comment(tid, f"dispatched: session={result.session_id} pid={os.getpid()} workspace={slug}")
         run = _Run(result=result, session_id=result.session_id)
         stop = self._stop_reason(tid, result, rc)
+        # Out of turns but making progress: resume the same session (bounded) instead of
+        # discarding the work. Stuck workers (no changes) and over-budget tasks still block.
+        continuations = 0
+        while (stop and stop[0] == "block" and stop[1].startswith("cap: turns")
+               and continuations < cfg.max_continuations
+               and self._worth_continuing(tid, worktree, base_ref)):
+            continuations += 1
+            self.comment(tid, f"turn limit reached with work in progress; resuming the same "
+                              f"session ({continuations}/{cfg.max_continuations})")
+            stop = self._resume_step(tid, worktree, slug, run, continue_prompt())
         if stop:
             return self._halt(tid, slug, stop)
 
@@ -549,6 +599,8 @@ class Dispatcher:
 
     def _block(self, task_id: int, reason: str) -> None:
         log.warning("task %s blocked: %s", task_id, reason)
+        if reason.startswith(_RESUMABLE):
+            self.ledger.update(task_id, resumable=1)
         try:
             self.move(task_id, "blocked")
         except Exception as e:  # noqa: BLE001

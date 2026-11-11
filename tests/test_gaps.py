@@ -27,6 +27,9 @@ FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys, time
 prompt = sys.stdin.read()
 open(os.environ["FAKE_PROMPT_OUT"], "w").write(prompt)
+if os.environ.get("FAKE_CALLS_OUT"):
+    with open(os.environ["FAKE_CALLS_OUT"], "a") as _f:
+        _f.write(json.dumps({"argv": sys.argv, "prompt": prompt}) + chr(10))
 if os.environ.get("FAKE_ENV_OUT"):
     open(os.environ["FAKE_ENV_OUT"], "w").write(json.dumps(
         {"env": {k: os.environ.get(k) for k in ("NTREE_WORKSPACE", "PORT")}, "argv": sys.argv}))
@@ -34,6 +37,17 @@ mode = os.environ.get("FAKE_MODE", "ok")
 print(json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}), flush=True)
 if mode == "hang":
     time.sleep(60)
+if mode in ("turncap_once", "turncap_always"):
+    n = int(open(os.environ["FAKE_CAP_COUNTER"]).read() or 0) + 1
+    open(os.environ["FAKE_CAP_COUNTER"], "w").write(str(n))
+    if mode == "turncap_always" or n == 1:
+        print(json.dumps({"type": "result", "subtype": "error_max_turns", "total_cost_usd": 0.5,
+                          "num_turns": 99, "is_error": True, "result": "Reached max turns"}), flush=True)
+        sys.exit(1)
+if mode == "noconv" and "--resume" in sys.argv:
+    print(json.dumps({"type": "result", "total_cost_usd": 0, "num_turns": 0, "is_error": True,
+                      "result": "No conversation found with session ID: x"}), flush=True)
+    sys.exit(1)
 text = os.environ.get("FAKE_TEXT", "done")
 print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}), flush=True)
 if mode == "flaky":
@@ -936,3 +950,128 @@ def test_pr_listing_adds_ci_status_when_the_token_allows_it(tmp_path, monkeypatc
     prmod = _fake_gh(tmp_path, monkeypatch, checks_allowed=True)
     rows = prmod.open_worker_prs(_cfg(tmp_path))
     assert "failing checks: ci" in cleanup.pr_problem(rows[0])
+
+
+# =====================================================================================
+# Resume instead of starting over
+# =====================================================================================
+def _calls(tmp_path, monkeypatch):
+    out = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_CALLS_OUT", str(out))
+    return out
+
+
+def _read_calls(path):
+    import json
+
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def _arm_resume(d, repo, monkeypatch, session="sess-old"):
+    d.ledger.update(1, resumable=1, session_id=session)
+    monkeypatch.setattr(d.ntree, "path", lambda s: repo)
+    for name in ("rm", "remove_branch"):
+        monkeypatch.setattr(d.ntree, name, lambda *a: pytest.fail("workspace was wiped on resume"))
+    monkeypatch.setattr(d.ntree, "new", lambda *a: pytest.fail("workspace was recreated on resume"))
+    monkeypatch.setattr(d, "_baseline", lambda *a: pytest.fail("baseline ran on a resumed workspace"))
+
+
+def test_requeued_capped_task_resumes_its_session_without_wiping(pipeline, repo, tmp_path, monkeypatch):
+    d, ev = pipeline
+    calls = _calls(tmp_path, monkeypatch)
+    _arm_resume(d, repo, monkeypatch)
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    first = _read_calls(calls)[0]
+    assert first["argv"][first["argv"].index("--resume") + 1] == "sess-old"
+    assert "Do NOT start over" in first["prompt"]
+    assert d.ledger.get(1)["state"] == "pr_open" and d.ledger.get(1)["resumable"] == 0
+    assert any("resuming the previous session" in c for c in ev["comments"])
+
+
+def test_resume_falls_back_to_a_fresh_session_on_the_same_files(pipeline, repo, tmp_path, monkeypatch):
+    d, _ = pipeline
+    calls = _calls(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_MODE", "noconv")
+    _arm_resume(d, repo, monkeypatch)
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    c = _read_calls(calls)
+    assert "--resume" in c[0]["argv"] and "--resume" not in c[1]["argv"]
+    assert "previous attempt" in c[1]["prompt"] and "Do not start over" in c[1]["prompt"].replace("do not", "Do not")
+    assert d.ledger.get(1)["state"] == "pr_open"
+
+
+def test_turn_cap_with_progress_continues_the_same_session(pipeline, tmp_path, monkeypatch):
+    d, ev = pipeline
+    calls = _calls(tmp_path, monkeypatch)
+    counter = tmp_path / "cap-count"; counter.write_text("0")
+    monkeypatch.setenv("FAKE_CAP_COUNTER", str(counter))
+    monkeypatch.setenv("FAKE_MODE", "turncap_once")
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    c = _read_calls(calls)
+    assert "--resume" not in c[0]["argv"]                           # fresh first run
+    assert c[1]["argv"][c[1]["argv"].index("--resume") + 1] == "s1"  # then the SAME session
+    assert "ran out of turns" in c[1]["prompt"]
+    assert d.ledger.get(1)["state"] == "pr_open"
+    assert any("turn limit reached" in x for x in ev["comments"])
+
+
+def test_continuations_are_bounded_and_the_block_stays_resumable(pipeline, tmp_path, monkeypatch):
+    d, _ = pipeline
+    calls = _calls(tmp_path, monkeypatch)
+    counter = tmp_path / "cap-count"; counter.write_text("0")
+    monkeypatch.setenv("FAKE_CAP_COUNTER", str(counter))
+    monkeypatch.setenv("FAKE_MODE", "turncap_always")
+    object.__setattr__(d.cfg, "max_continuations", 1)
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert len(_read_calls(calls)) == 2                             # 1 run + 1 continuation, then stop
+    row = d.ledger.get(1)
+    assert row["state"] == "blocked" and row["resumable"] == 1 and row["session_id"]
+
+
+def test_no_continuation_when_the_worker_produced_nothing_or_budget_is_gone(tmp_path, repo):
+    d = _dispatcher(tmp_path, TARGET_REPO_PATH=str(repo))
+    d.ledger.upsert_claim(1, "task-1-x", "task-1-x")
+    assert d._worth_continuing(1, repo, "main") is False            # clean branch == main: no progress
+    _change(repo)
+    assert d._worth_continuing(1, repo, "main") is True
+    d.ledger.add_cost(1, 99.0)
+    assert d._worth_continuing(1, repo, "main") is False            # over the task budget
+    d.ledger.upsert_claim(1, "task-1-x", "task-1-x")                # fresh budget
+    d.ledger.request_cancel(1)
+    assert d._worth_continuing(1, repo, "main") is False            # operator cancelled
+
+
+def test_only_cap_blocks_are_marked_resumable(tmp_path):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d.move = lambda *a: None; d.comment = lambda *a: None
+    for reason in ("gate: tests red", "gate: review blocking", "worker error (rc=1): x"):
+        d._block(1, reason)
+        assert d.ledger.get(1)["resumable"] == 0, reason
+    for reason in ("cap: turns=60", "cap: wall-clock 45m", "cap: task cost $10.01 >= $10.00"):
+        d.ledger.update(1, resumable=0)
+        d._block(1, reason)
+        assert d.ledger.get(1)["resumable"] == 1, reason
+
+
+def test_resume_needs_a_session_a_workspace_and_progress(tmp_path, repo, monkeypatch):
+    d = _dispatcher(tmp_path, TARGET_REPO_PATH=str(repo))
+    d.ledger.upsert_claim(1, "task-1-x", "task-1-x")
+    _change(repo)
+    monkeypatch.setattr(d.ntree, "path", lambda s: repo)
+    assert d._resume_workspace(1, "task-1-x", "main") is None        # not flagged resumable
+    d.ledger.update(1, resumable=1)
+    assert d._resume_workspace(1, "task-1-x", "main") is None        # no session id to resume
+    d.ledger.update(1, session_id="sess")
+    assert d._resume_workspace(1, "task-1-x", "main") == repo        # all three present
+    monkeypatch.setattr(d.ntree, "path", lambda s: (_ for _ in ()).throw(NtreeError("gone")))
+    assert d._resume_workspace(1, "task-1-x", "main") is None        # workspace was pruned
+
+
+def test_requeue_keeps_session_and_resumable_flag(tmp_path):
+    led = Ledger(tmp_path / "l.db")
+    led.upsert_claim(1, "s", "s")
+    led.update(1, session_id="sess", resumable=1, state="blocked")
+    led.upsert_claim(1, "s", "s")                                   # human drags the card back
+    row = led.get(1)
+    assert row["session_id"] == "sess" and row["resumable"] == 1 and row["test_retries"] == 0

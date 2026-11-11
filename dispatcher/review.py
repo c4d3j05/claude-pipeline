@@ -43,6 +43,20 @@ def working_tree_dirty(worktree: Path) -> bool:
     return bool(cp.stdout.strip())
 
 
+def commits_ahead(worktree: Path, base_ref: str) -> int:
+    cp = subprocess.run(["git", "rev-list", "--count", f"{base_ref}..HEAD"], cwd=worktree,
+                        capture_output=True, text=True, timeout=60, env=clean_env("plain"))
+    try:
+        return int(cp.stdout.strip()) if cp.returncode == 0 else 0
+    except ValueError:
+        return 0
+
+
+def has_work(worktree: Path, base_ref: str) -> bool:
+    """True if the workspace holds a worker's progress (uncommitted changes or new commits)."""
+    return working_tree_dirty(worktree) or commits_ahead(worktree, base_ref) > 0
+
+
 MAX_DIFF_CHARS = 200_000   # prompt goes via stdin, so this is a cost limit, not an argv limit
 
 
