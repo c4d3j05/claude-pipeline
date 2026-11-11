@@ -10,6 +10,7 @@ resolve the target repo's own environment.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 # Per-session variables of an enclosing Claude Code session. If the dispatcher is started
@@ -54,11 +55,45 @@ def load_env_file(path: Path) -> dict[str, str]:
     return vals
 
 
-def clean_env() -> dict[str, str]:
+# Secrets that must never ride along by default. The dispatcher's own environment (and
+# ~/.worker.env) may hold them, but each subprocess gets only what its job needs.
+_SECRET_VARS = (
+    "GH_TOKEN", "GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN", "VIKUNJA_TOKEN", "VIKUNJA_API_TOKEN", "SLACK_WEBHOOK_URL",
+)
+# Names that look like credentials: loaded from ~/.worker.env only when a scope asks for them.
+_SECRETISH = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY", re.IGNORECASE)
+_SCOPES = {
+    "plain": (),                                                    # tests, ntree, local git
+    "claude": ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+    "github": ("GH_TOKEN", "GITHUB_TOKEN"),                         # gh / git push / fetch
+}
+
+
+def clean_env(scope: str = "plain") -> dict[str, str]:
+    """Environment for a spawned subprocess, with credentials limited to `scope`.
+
+    scope="plain"  no credentials: the test gate (which runs worker-written code outside
+                   the sandbox), `ntree`, local git.
+    scope="claude" only the Claude credentials: worker and reviewer sessions.
+    scope="github" only GH_TOKEN/GITHUB_TOKEN: `gh`, and git operations that hit the remote.
+
+    Credentials come from ~/.worker.env (re-read on every call, so rotated tokens apply to
+    the next task) or, failing that, the dispatcher's own environment.
+    """
     env = dict(os.environ)
     for k in _SESSION_VARS:
         env.pop(k, None)
-    env.update(load_env_file(worker_env_path()))  # credentials: CLAUDE_CODE_OAUTH_TOKEN, GH_TOKEN…
+    for k in _SECRET_VARS:
+        env.pop(k, None)
+    file_vals = load_env_file(worker_env_path())
+    for k, v in file_vals.items():
+        if not (k in _SECRET_VARS or _SECRETISH.search(k)):
+            env[k] = v          # ordinary settings apply to every subprocess
+    for k in _SCOPES[scope]:    # credentials only to the scope that needs them
+        val = file_vals.get(k) or os.environ.get(k)
+        if val:
+            env[k] = val
     venv = env.pop("VIRTUAL_ENV", None)
     env.pop("UV", None)
     env.pop("PYTHONHOME", None)

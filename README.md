@@ -76,27 +76,47 @@ claude-pipeline-dispatcher -f` or `logs/dispatcher.err.log`.
 
 ## Limits and recovery
 
-- **Per-task budget:** `TASK_CAP_USD` (default 10) covers the worker, its retries *and* the
-  review session. The daily cap (`DAILY_CAP_USD`) counts all of it too.
-- **Wall clock:** enforced by a watchdog, so a silent/hung `claude` is killed at
-  `WALL_CLOCK_LIMIT_MIN` instead of holding a slot forever.
-- **Failed sessions:** an errored `claude` run (expired auth, API error, crash) blocks the
-  task with the real reason instead of being fed to the gates.
-- **Gates re-verify:** tests *and* a clean working tree are re-checked after every worker
-  turn, so the PR contains exactly what was tested. A truncated review diff is flagged.
-- **Fresh base:** workers fork from `origin/<BASE_BRANCH>` after a fetch, and a failing
-  `NTREE_SETUP_CMD` fails the task.
-- **Restart:** interrupted tasks are moved to *Blocked* with a comment. Dragging a blocked
-  card back to **Ready** re-queues it with a fresh budget and retries. Only one dispatcher
-  can run per `PIPELINE_DB` (lock file `pipeline.lock`).
-- **Housekeeping:** blocked workspaces (worktree, branch, DB) are removed by the nightly job
-  after `BLOCKED_RETENTION_DAYS`; `DB_NAME_TEMPLATE` says which DB to drop.
-- **Stopping:** the dispatcher drains running tasks on SIGTERM (systemd allows up to 2h).
+- **Budget:** `TASK_CAP_USD` (default 10) covers the worker, retries *and* the review; the
+  daily cap counts everything. Cost history survives a retry (`lifetime_cost`).
+- **Capacity:** test gates are CPU/DB heavy, so at most `MAX_GATES` (default 1) run at once
+  and each is cut off after `GATE_TIMEOUT_MIN` (default 30) with its **whole process tree**
+  stopped. Size `MAX_WORKERS` to the machine (default 2). The worker's own Stop-hook gate runs
+  inside `claude` and is not queued; keep its `timeout` above your gate's duration.
+- **Baseline check:** before a worker is launched, the gate runs once on the untouched base
+  commit (result cached per SHA, `BASELINE_CHECK=false` to disable). A red base blocks the
+  task for free instead of a worker "fixing" an environment problem.
+- **Credentials are scoped** per subprocess, read fresh from `~/.worker.env` for every task
+  (`WORKER_ENV_FILE` to override): the Claude token reaches only `claude`; `GH_TOKEN` reaches
+  only `gh` and git operations against the remote; the test gate, `ntree` and local git get
+  none (the gate runs worker-written code). The template also denies workers `Read` access to
+  `~/.worker.env`, `~/.ssh`, `~/.aws`, `~/.config/gh` and similar.
+- **Failures:** a transient API/network error is retried with backoff (`TRANSIENT_RETRIES`);
+  a credentials problem (not logged in, bad key) is not retried and **pauses dispatching**
+  with an alert. Any other errored session blocks with the real reason. Permission denials
+  come from the result event, so a shell printing "Permission denied" does not count.
+- **Cancel** is honoured at every phase: before the first worker launch, between gate and
+  review, and while a worker runs. (A cancel during the minutes-long `ntree new` setup takes
+  effect as soon as setup returns.)
+- **Gates re-verify:** tests and a clean working tree are re-checked after every worker turn;
+  a truncated review diff is flagged. Workers fork from a freshly fetched `origin/<base>`, and
+  a failing `NTREE_SETUP_CMD` fails the task.
+- **Git locks:** workers are stopped with SIGTERM + a 15 s grace (git removes its own locks on
+  SIGTERM); stale locks are swept at startup/nightly; `ntree new` retries on a lock error.
+- **Restart:** interrupted tasks go to *Blocked*; drag the card back to **Ready** to retry with
+  a fresh budget. One dispatcher per `PIPELINE_DB`. Stopping drains running tasks; a second
+  SIGTERM/Ctrl-C stops the workers and exits.
+- **Open PRs are watched:** merge conflicts, failing CI and requested changes are posted to the
+  card (and Slack) once per change. Closing or merging a PR tears down its workspace; only the
+  *current* attempt's PR can do that.
+- **Alerts:** 3 failed polls in a row (expired Vikunja token, API down) alert via Slack.
+- **Housekeeping (nightly):** blocked workspaces after `BLOCKED_RETENTION_DAYS`, task logs after
+  `LOG_RETENTION_DAYS`, stale git locks.
 - `prepare-repo` renders the worker's Stop hook from `TEST_CMD`; **commit** the generated
   files to the base branch (`selftest` checks this).
 
-Not covered: CI-status / review-comment feedback loops, PR conflict handling, and sandboxing
-the dispatcher's own test run (worker-written tests execute with your privileges).
+Not covered: automatically *fixing* a PR after CI/review feedback (the human is notified, the
+pipeline does not act), rebasing a PR when the base moves, and sandboxing the dispatcher's own
+test run beyond removing credentials from it.
 
 ## Commands
 

@@ -10,15 +10,23 @@ from pathlib import Path
 from .config import Config
 from .log import get
 from .ntree import Ntree
+from .proc import TIMEOUT_RC
+from .procenv import clean_env
 from .prompt import review_prompt
 from .worker import launch
 
 log = get("review")
 
 
+class GateTimeout(RuntimeError):
+    """The test gate exceeded GATE_TIMEOUT_MIN (its process tree has been stopped)."""
+
+
 def run_tests(cfg: Config, ntree: Ntree, slug: str) -> tuple[bool, str]:
     """Run the gate's test command inside the worktree. Returns (green, tail)."""
-    cp = ntree.run(slug, shlex.split(cfg.test_cmd), timeout=cfg.wall_clock_limit_min * 60)
+    cp = ntree.run(slug, shlex.split(cfg.test_cmd), timeout=cfg.gate_timeout_min * 60)
+    if cp.returncode == TIMEOUT_RC:
+        raise GateTimeout(f"test gate timed out after {cfg.gate_timeout_min}m")
     output = (cp.stdout or "") + (cp.stderr or "")
     tail = "\n".join(output.splitlines()[-40:])
     return cp.returncode == 0, tail
@@ -30,6 +38,7 @@ def working_tree_dirty(worktree: Path) -> bool:
         cwd=worktree,
         capture_output=True,
         text=True,
+        env=clean_env("plain"),
     )
     return bool(cp.stdout.strip())
 
@@ -43,6 +52,7 @@ def diff_against_base(worktree: Path, base: str) -> str:
         cwd=worktree,
         capture_output=True,
         text=True,
+        env=clean_env("plain"),
     )
     return cp.stdout
 

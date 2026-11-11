@@ -145,7 +145,9 @@ def retry_task(cfg: Config, ledger: Ledger, task_id: int) -> str:
             with contextlib.suppress(Exception):
                 vk.delete_comment(task_id, c["id"])
     vk.move_task(cfg.project_id, view, ready["id"], task_id)
-    ledger.delete_task(task_id)
+    # Keep the row (and its lifetime cost): a blocked row sitting in Ready is re-claimed
+    # with a fresh budget by upsert_claim.
+    ledger.update(task_id, state="blocked", pr_url=None)
     return "re-queued"
 
 

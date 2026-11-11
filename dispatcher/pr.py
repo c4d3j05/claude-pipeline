@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .config import Config
 from .log import get
+from .procenv import clean_env
 from .prompt import acceptance_criteria
 
 log = get("pr")
@@ -16,7 +17,8 @@ log = get("pr")
 
 def _git(worktree: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", *args], cwd=worktree, capture_output=True, text=True, timeout=timeout
+        ["git", *args], cwd=worktree, capture_output=True, text=True, timeout=timeout,
+        env=clean_env("github"),
     )
 
 
@@ -84,6 +86,7 @@ def _open_pr_url(cfg: Config, worktree: Path, branch: str) -> str:
     cp = subprocess.run(
         ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url"],
         cwd=worktree, capture_output=True, text=True, timeout=120,
+        env=clean_env("github"),
     )
     try:
         rows = json.loads(cp.stdout or "[]") if cp.returncode == 0 else []
@@ -100,6 +103,7 @@ def _ensure_label(cfg: Config, name: str, color: str, desc: str) -> None:
         capture_output=True,
         text=True,
         timeout=60,
+        env=clean_env("github"),
     )
 
 
@@ -147,7 +151,8 @@ def push_and_create(
     if needs_qa:
         args += ["--label", "needs-qa"]
 
-    cp = subprocess.run(args, cwd=worktree, capture_output=True, text=True, timeout=300)
+    cp = subprocess.run(args, cwd=worktree, capture_output=True, text=True, timeout=300,
+                        env=clean_env("github"))
     body_file.unlink(missing_ok=True)
     if cp.returncode != 0:
         raise RuntimeError(f"gh pr create failed: {cp.stderr.strip() or cp.stdout.strip()}")
@@ -161,13 +166,15 @@ def open_worker_prs(cfg: Config) -> list[dict]:
             "gh", "pr", "list",
             "--label", cfg.pr_label,
             "--state", "all",
-            "--json", "number,state,headRefName,url,mergedAt,mergeCommit",
+            "--json",
+            "number,state,headRefName,url,mergedAt,mergeCommit,mergeable,reviewDecision,statusCheckRollup",
             "--limit", "500",
         ],
         cwd=cfg.repo_path,
         capture_output=True,
         text=True,
         timeout=120,
+        env=clean_env("github"),
     )
     if cp.returncode != 0:
         log.warning("gh pr list failed: %s", cp.stderr.strip())

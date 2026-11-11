@@ -36,6 +36,14 @@ if mode == "hang":
     time.sleep(60)
 text = os.environ.get("FAKE_TEXT", "done")
 print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}), flush=True)
+if mode == "flaky":
+    n = int(open(os.environ["FAKE_FLAKY_COUNTER"]).read() or 0) + 1
+    open(os.environ["FAKE_FLAKY_COUNTER"], "w").write(str(n))
+    if n <= int(os.environ["FAKE_FLAKY_TIMES"]):
+        text = os.environ["FAKE_FLAKY_TEXT"]
+        print(json.dumps({"type": "result", "total_cost_usd": 0.5, "num_turns": 1,
+                          "is_error": True, "result": text}), flush=True)
+        sys.exit(1)
 err = mode == "error"
 print(json.dumps({"type": "result", "total_cost_usd": 0.5, "num_turns": 3,
                   "is_error": err, "result": text}), flush=True)
@@ -361,19 +369,29 @@ def test_cost_cap_stops_before_review(pipeline):
 
 
 # --- worker credentials file --------------------------------------------------------------
-def test_worker_env_file_is_parsed_and_reread_each_time(tmp_path, monkeypatch):
+def test_credentials_are_scoped_to_the_subprocess_that_needs_them(tmp_path, monkeypatch):
     from dispatcher import procenv
 
     f = tmp_path / "worker.env"
-    f.write_text("# creds\nexport CLAUDE_CODE_OAUTH_TOKEN=tok1\nGH_TOKEN='gh1'\nBAD LINE\nQ=\"a b\"\n")
+    f.write_text("# creds\nexport CLAUDE_CODE_OAUTH_TOKEN=tok1\nGH_TOKEN='gh1'\n"
+                 "VIKUNJA_TOKEN=vk\nBAD LINE\nQ=\"a b\"\n")
     monkeypatch.setenv("WORKER_ENV_FILE", str(f))
     monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.setenv("CLAUDE_CODE_MESSAGING_TOKEN", "leak")
-    e = procenv.clean_env()
-    assert (e["CLAUDE_CODE_OAUTH_TOKEN"], e["GH_TOKEN"], e["Q"]) == ("tok1", "gh1", "a b")
-    assert "CLAUDECODE" not in e and "CLAUDE_CODE_MESSAGING_TOKEN" not in e
+    monkeypatch.setenv("GH_TOKEN", "from-the-dispatchers-own-env")   # inherited secrets are stripped too
+    secrets = {"CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "VIKUNJA_TOKEN"}
+
+    plain = procenv.clean_env()                       # test gate, ntree, local git
+    assert not (secrets & set(plain)) and plain["Q"] == "a b"
+    claude = procenv.clean_env("claude")              # worker / reviewer
+    assert claude["CLAUDE_CODE_OAUTH_TOKEN"] == "tok1" and "GH_TOKEN" not in claude
+    assert "VIKUNJA_TOKEN" not in claude
+    gh = procenv.clean_env("github")                  # gh / git push
+    assert gh["GH_TOKEN"] == "gh1" and "CLAUDE_CODE_OAUTH_TOKEN" not in gh
+    for env in (plain, claude, gh):
+        assert "CLAUDECODE" not in env and "CLAUDE_CODE_MESSAGING_TOKEN" not in env
     f.write_text("export CLAUDE_CODE_OAUTH_TOKEN=tok2\n")  # rotated between tasks
-    assert procenv.clean_env()["CLAUDE_CODE_OAUTH_TOKEN"] == "tok2"
+    assert procenv.clean_env("claude")["CLAUDE_CODE_OAUTH_TOKEN"] == "tok2"
 
 
 def test_missing_worker_env_file_is_fine(tmp_path, monkeypatch):
@@ -559,3 +577,323 @@ def test_requeue_restarts_the_elapsed_clock(tmp_path):
     led.conn.commit()
     led.upsert_claim(1, "s", "s")
     assert led.get(1)["started_at"] > "2020-01-01T00:00:00"
+
+
+# =====================================================================================
+# Audit 2
+# =====================================================================================
+def _pr_open_row(led, tid=7, url="https://gh/pr/2"):
+    led.upsert_claim(tid, f"task-{tid}-x", f"task-{tid}-x")
+    led.update(tid, state="pr_open", pr_url=url)
+
+
+class _VKStub:
+    def __init__(self):
+        self.calls = []
+
+    def move_task(self, *a):
+        self.calls.append(("move", a[-1]))
+
+    def comment(self, tid, text):
+        self.calls.append(("comment", tid, text))
+
+
+class _NTStub:
+    def __init__(self):
+        self.removed = []
+
+    def rm(self, slug):
+        self.removed.append(slug)
+
+
+def _run_cleanup(monkeypatch, tmp_path, led, prs):
+    monkeypatch.setattr(cleanup, "open_worker_prs", lambda cfg: prs)
+    monkeypatch.setattr(cleanup.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", ""))
+    vk, nt = _VKStub(), _NTStub()
+    b = {"done": {"project_view_id": 1, "id": 1}, "blocked": {"project_view_id": 1, "id": 2}}
+    cleanup.process_closed_prs(_cfg(tmp_path), led, nt, vk, b, None)
+    return vk, nt
+
+
+def test_old_closed_pr_never_tears_down_a_running_retry(tmp_path, monkeypatch):
+    led = Ledger(tmp_path / "l.db")
+    led.upsert_claim(7, "task-7-x", "task-7-x")
+    led.update(7, state="working")                        # re-queued; worker is running
+    old = {"number": 1, "state": "CLOSED", "headRefName": "task-7-x", "url": "https://gh/pr/1"}
+    vk, nt = _run_cleanup(monkeypatch, tmp_path, led, [old])
+    assert nt.removed == [] and vk.calls == [] and led.get(7)["state"] == "working"
+
+
+def test_old_closed_pr_is_ignored_once_the_retry_has_its_own_pr(tmp_path, monkeypatch):
+    led = Ledger(tmp_path / "l.db")
+    _pr_open_row(led, url="https://gh/pr/2")
+    old = {"number": 1, "state": "CLOSED", "headRefName": "task-7-x", "url": "https://gh/pr/1"}
+    _vk, nt = _run_cleanup(monkeypatch, tmp_path, led, [old])
+    assert nt.removed == [] and led.get(7)["state"] == "pr_open"
+
+
+def test_merged_pr_moves_card_to_done_and_tears_down(tmp_path, monkeypatch):
+    led = Ledger(tmp_path / "l.db")
+    _pr_open_row(led)
+    pr = {"number": 2, "state": "MERGED", "headRefName": "task-7-x", "url": "https://gh/pr/2",
+          "mergeCommit": {"oid": "abcdef1234567"}}
+    vk, nt = _run_cleanup(monkeypatch, tmp_path, led, [pr])
+    assert nt.removed == ["task-7-x"] and led.get(7)["state"] == "done"
+    assert ("move", 7) in vk.calls
+    assert any("merged: abcdef123" in c[2] for c in vk.calls if c[0] == "comment")
+
+
+def test_closed_unmerged_pr_blocks_the_card(tmp_path, monkeypatch):
+    led = Ledger(tmp_path / "l.db")
+    _pr_open_row(led)
+    pr = {"number": 2, "state": "CLOSED", "headRefName": "task-7-x", "url": "https://gh/pr/2"}
+    vk, _nt = _run_cleanup(monkeypatch, tmp_path, led, [pr])
+    assert led.get(7)["state"] == "blocked"
+    assert any("closed without merge" in c[2] for c in vk.calls if c[0] == "comment")
+
+
+# --- open PR watch -------------------------------------------------------------------------
+def test_pr_problem_detection():
+    assert cleanup.pr_problem({"mergeable": "MERGEABLE", "statusCheckRollup": [
+        {"name": "lint", "conclusion": "SUCCESS"}]}) == ""
+    assert "conflicts" in cleanup.pr_problem({"mergeable": "CONFLICTING"})
+    assert "failing checks: tests" in cleanup.pr_problem({"statusCheckRollup": [
+        {"name": "tests", "conclusion": "FAILURE"}, {"name": "lint", "conclusion": "SUCCESS"}]})
+    assert "changes requested" in cleanup.pr_problem({"reviewDecision": "CHANGES_REQUESTED"})
+    assert cleanup.pr_problem({"mergeable": "UNKNOWN"}) == ""
+
+
+def test_pr_watch_notifies_once_per_change(tmp_path, monkeypatch):
+    led = Ledger(tmp_path / "l.db")
+    _pr_open_row(led)
+    pr = {"state": "OPEN", "headRefName": "task-7-x", "url": "https://gh/pr/2", "mergeable": "CONFLICTING"}
+    alerts, vk = [], _VKStub()
+    slack = type("S", (), {"alert": lambda self, t: alerts.append(t)})()
+    monkeypatch.setattr(cleanup, "open_worker_prs", lambda cfg: [pr])
+    cleanup.watch_open_prs(_cfg(tmp_path), led, vk, slack)
+    cleanup.watch_open_prs(_cfg(tmp_path), led, vk, slack)          # unchanged: silent
+    assert len(alerts) == 1 and len(vk.calls) == 1
+    pr["mergeable"] = "MERGEABLE"
+    cleanup.watch_open_prs(_cfg(tmp_path), led, vk, slack)
+    assert len(vk.calls) == 2 and "healthy again" in vk.calls[1][2]
+
+
+def test_old_task_logs_are_pruned(tmp_path):
+    cfg = _cfg(tmp_path, LOG_RETENTION_DAYS="0")
+    led = Ledger(tmp_path / "l.db")
+    led.upsert_claim(1, "task-1-x", "task-1-x"); led.update(1, state="done")
+    led.upsert_claim(2, "task-2-y", "task-2-y")                     # still active: keep
+    (tmp_path / "logs" / "task-1-x").mkdir(parents=True)
+    (tmp_path / "logs" / "task-2-y").mkdir(parents=True)
+    time.sleep(1.1)
+    assert cleanup.prune_logs(cfg, led, tmp_path / "logs") == 1
+    assert not (tmp_path / "logs" / "task-1-x").exists() and (tmp_path / "logs" / "task-2-y").exists()
+
+
+# --- timeouts must not leak process trees ----------------------------------------------------
+def test_run_group_timeout_kills_the_whole_tree(tmp_path):
+    from dispatcher.proc import TIMEOUT_RC, run_group
+
+    marker = tmp_path / "grandchild.pid"
+    cp = run_group(["sh", "-c", f"sleep 47 & echo $! > {marker}; sleep 47"], timeout=1, grace=2)
+    assert cp.returncode == TIMEOUT_RC and "timed out" in cp.stderr
+    time.sleep(0.3)
+    pid = int(marker.read_text())
+    alive = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True).stdout.strip()
+    assert alive == "" or alive.startswith("Z"), f"grandchild {pid} survived the timeout"
+
+
+def test_gate_timeout_blocks_with_a_clear_reason(tmp_path, monkeypatch):
+    from dispatcher.proc import TIMEOUT_RC
+    from dispatcher.review import GateTimeout, run_tests
+
+    class NT:
+        def run(self, *a, **k):
+            return subprocess.CompletedProcess([], TIMEOUT_RC, "", "")
+    with pytest.raises(GateTimeout):
+        run_tests(_cfg(tmp_path), NT(), "s")
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: (_ for _ in ()).throw(GateTimeout("test gate timed out after 30m")))
+    stop = d._verify(1, tmp_path, "s", dmod._Run(SessionResult(), "sid"))
+    assert stop == ("block", "gate: test gate timed out after 30m")
+
+
+def test_gates_are_serialised(tmp_path, monkeypatch):
+    import threading
+
+    d = _dispatcher(tmp_path, MAX_GATES="1")
+    live, peak, lock = [0], [0], threading.Lock()
+
+    def fake(*a):
+        with lock:
+            live[0] += 1; peak[0] = max(peak[0], live[0])
+        time.sleep(0.15)
+        with lock:
+            live[0] -= 1
+        return True, ""
+    monkeypatch.setattr(dmod, "run_tests", fake)
+    ts = [threading.Thread(target=d._gate, args=("s",)) for _ in range(4)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert peak[0] == 1
+
+
+# --- cancel is honoured at every phase --------------------------------------------------------
+def test_cancel_during_setup_never_launches_a_worker(pipeline, monkeypatch):
+    d, ev = pipeline
+    d.ledger.request_cancel(1)
+    monkeypatch.setattr(d, "_launch", lambda *a, **k: pytest.fail("worker launched after cancel"))
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert d.ledger.get(1)["state"] == "blocked" and "blocked" in ev["moved"]
+
+
+def test_cancel_during_gate_skips_the_review(pipeline, monkeypatch):
+    d, ev = pipeline
+
+    def gate_then_cancel(*a):
+        d.ledger.request_cancel(1)                 # operator cancels while tests run
+        return True, ""
+    monkeypatch.setattr(dmod, "run_tests", gate_then_cancel)
+    monkeypatch.setattr(d, "_review", lambda *a, **k: pytest.fail("reviewer ran after cancel"))
+    monkeypatch.setattr(d.cfg.__class__, "baseline_check", False, raising=False)
+    object.__setattr__(d.cfg, "baseline_check", False)
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert d.ledger.get(1)["state"] == "blocked" and ev["prs"] == []
+
+
+# --- transient failures and credential problems --------------------------------------------------
+def _flaky(tmp_path, monkeypatch, fail_times, text):
+    counter = tmp_path / "count"
+    counter.write_text("0")
+    monkeypatch.setenv("FAKE_FLAKY_COUNTER", str(counter))
+    monkeypatch.setenv("FAKE_FLAKY_TIMES", str(fail_times))
+    monkeypatch.setenv("FAKE_FLAKY_TEXT", text)
+    monkeypatch.setenv("FAKE_MODE", "flaky")
+    monkeypatch.setattr(dmod, "TRANSIENT_BACKOFF_S", (0.01, 0.01))
+    return counter
+
+
+def test_transient_error_is_retried_and_every_attempt_costs(tmp_path, fake_bin, monkeypatch):
+    counter = _flaky(tmp_path, monkeypatch, 2, "API Error: 529 overloaded_error")
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    result, rc = d._launch(1, tmp_path, "s", "p", "session.jsonl")
+    assert rc == 0 and not result.is_error and counter.read_text() == "3"
+    assert d.ledger.get(1)["cost_usd"] == pytest.approx(1.5)      # 3 attempts x 0.5
+
+
+def test_transient_retries_are_bounded(tmp_path, fake_bin, monkeypatch):
+    counter = _flaky(tmp_path, monkeypatch, 99, "API Error: 529 overloaded_error")
+    d = _dispatcher(tmp_path, TRANSIENT_RETRIES="2")
+    d.ledger.upsert_claim(1, "s", "s")
+    _result, rc = d._launch(1, tmp_path, "s", "p", "session.jsonl")
+    assert rc != 0 and counter.read_text() == "3"                 # 1 try + 2 retries, then give up
+
+
+def test_auth_failure_is_not_retried_and_pauses_dispatching(tmp_path, fake_bin, monkeypatch):
+    counter = _flaky(tmp_path, monkeypatch, 99, "Not logged in · Please run /login")
+    d = _dispatcher(tmp_path)
+    alerts = []
+    d.slack.alert = alerts.append
+    d.ledger.upsert_claim(1, "s", "s")
+    result, rc = d._launch(1, tmp_path, "s", "p", "session.jsonl")
+    assert counter.read_text() == "1"                              # no retry for a login problem
+    stop = d._stop_reason(1, result, rc)
+    assert stop[0] == "block" and "paused" in stop[1]
+    assert d.ledger.is_paused() and len(alerts) == 1
+
+
+# --- poll failures alert the human -----------------------------------------------------------------
+def test_repeated_poll_failures_alert_once_then_recovery(tmp_path, monkeypatch):
+    d = _dispatcher(tmp_path)
+    alerts = []
+    d.slack.alert = alerts.append
+    boom = {"on": True}
+
+    def tick():
+        if boom["on"]:
+            raise RuntimeError("401 from Vikunja")
+    monkeypatch.setattr(d, "tick", tick)
+    for _ in range(5):
+        d._guarded_tick()
+    assert len(alerts) == 1 and "401 from Vikunja" in alerts[0]
+    boom["on"] = False
+    d._guarded_tick()
+    assert len(alerts) == 2 and "recovered" in alerts[1]
+
+
+# --- baseline: a red base blocks for free ------------------------------------------------------------
+def test_red_baseline_blocks_without_spending_on_a_worker(pipeline, monkeypatch):
+    d, ev = pipeline
+    monkeypatch.setattr(d.ntree, "rev", lambda ref: "deadbeef" * 5)
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: (False, "ImportError: libpango missing"))
+    monkeypatch.setattr(d, "_launch", lambda *a, **k: pytest.fail("worker launched on a red base"))
+    d.run_pipeline({"id": 1, "title": "x", "description": ""}, "task-1-x")
+    assert d.ledger.get(1)["state"] == "blocked" and d.ledger.get(1)["cost_usd"] == 0
+    assert any("baseline red" in c and "libpango" in c for c in ev["comments"])
+
+
+def test_baseline_result_is_cached_per_commit(pipeline, monkeypatch):
+    d, _ev = pipeline
+    monkeypatch.setattr(d.ntree, "rev", lambda ref: "cafe" * 10)
+    runs = []
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: (runs.append(1) or True, ""))
+    assert d._baseline(1, Path("."), "s", "main") is None
+    assert d._baseline(1, Path("."), "s", "main") is None
+    assert len(runs) == 1                                          # second task reuses the result
+
+
+def test_baseline_can_be_disabled(pipeline, monkeypatch):
+    d, _ = pipeline
+    object.__setattr__(d.cfg, "baseline_check", False)
+    monkeypatch.setattr(dmod, "run_tests", lambda *a: pytest.fail("baseline ran while disabled"))
+    assert d._baseline(1, Path("."), "s", "main") is None
+
+
+# --- permission-denial detection ---------------------------------------------------------------------------
+def test_shell_permission_denied_is_not_a_tool_denial():
+    from dispatcher import stream
+
+    shell = ('{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,'
+             '"content":"bash: ./deploy.sh: Permission denied"}]}}')
+    assert stream.parse_lines([shell] * 3).permission_denials == []
+    real = ('{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,'
+            '"content":"Claude requested permissions to use Bash, but you haven\'t granted it yet."}]}}')
+    assert len(stream.parse_lines([real]).permission_denials) == 1
+
+
+def test_result_event_denials_are_authoritative():
+    from dispatcher import stream
+
+    noisy = ('{"type":"user","message":{"content":[{"type":"tool_result","is_error":true,'
+             '"content":"requested permissions to use Bash"}]}}')
+    result = '{"type":"result","total_cost_usd":0.1,"num_turns":2,"permission_denials":[]}'
+    assert stream.parse_lines([noisy, result]).permission_denials == []
+    result2 = '{"type":"result","total_cost_usd":0.1,"permission_denials":[{"tool_name":"Bash"}]}'
+    assert len(stream.parse_lines([result2]).permission_denials) == 1
+
+
+# --- shutdown / retry bookkeeping ---------------------------------------------------------------------------------
+def test_second_signal_force_stops_workers_and_exits(tmp_path, monkeypatch):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "s", "s")
+    d.ledger.update(1, state="working", pid=4242)
+    killed, exited = [], []
+    monkeypatch.setattr(dmod, "_is_claude_proc", lambda pid: True)
+    monkeypatch.setattr(dmod, "kill_group", lambda pid, grace=0: killed.append(pid))
+    monkeypatch.setattr(dmod.os, "_exit", lambda code: exited.append(code))
+    d._on_signal(15, None)
+    assert d._stop.is_set() and killed == []                        # first: just drain
+    d._on_signal(15, None)
+    assert killed == [4242] and exited == [1]                       # second: stop and leave
+
+
+def test_retry_keeps_lifetime_cost(tmp_path):
+    led = Ledger(tmp_path / "l.db")
+    led.upsert_claim(1, "s", "s")
+    led.add_cost(1, 2.0)
+    led.upsert_claim(1, "s", "s")                                   # re-queued: budget resets
+    led.add_cost(1, 1.0)
+    row = led.get(1)
+    assert row["cost_usd"] == pytest.approx(1.0) and row["lifetime_cost"] == pytest.approx(3.0)

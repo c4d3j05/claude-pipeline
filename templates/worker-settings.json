@@ -17,7 +17,14 @@
       "Bash(git * push*)",
       "Bash(rm -fr*)",
       "Bash(rm -r -f*)",
-      "Bash(rm --recursive*)"
+      "Bash(rm --recursive*)",
+      "Read(~/.worker.env)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.config/gh/**)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(~/.git-credentials)",
+      "Read(~/.netrc)"
     ]
   },
   "sandbox": {
@@ -40,7 +47,7 @@
           {
             "type": "command",
             "command": "bash -c 'set -o pipefail; ntree run \"$NTREE_WORKSPACE\" -- uv run pytest -x -q 2>&1 | tail -40'",
-            "timeout": 600
+            "timeout": 1800
           }
         ]
       }

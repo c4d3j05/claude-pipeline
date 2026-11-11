@@ -8,7 +8,13 @@ denials, and the final result (cost, duration, turns, summary, error state).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
+
+# Phrasing of a real tool-permission refusal (a shell printing "Permission denied" is not one).
+_DENIAL = re.compile(
+    r"requested permissions|haven't granted|permission to use|denied for \w+\(|"
+    r"has been denied|was denied", re.IGNORECASE)
 
 
 @dataclass
@@ -17,6 +23,7 @@ class SessionResult:
     last_message: str = ""          # rolling "last message" on the task
     tool_uses: int = 0              # cheap progress signal
     permission_denials: list[str] = field(default_factory=list)
+    denials_authoritative: bool = False   # set once the result event reports them
     cost_usd: float = 0.0
     duration_ms: int = 0
     num_turns: int = 0
@@ -56,7 +63,9 @@ def parse_event(ev: dict, out: SessionResult) -> None:
         for block in msg.get("content", []) or []:
             if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
                 text = _text_from_content(block.get("content"))
-                if "permission" in text.lower() or "denied" in text.lower():
+                # Fallback only (a killed session never emits a result event); the result
+                # event's own list is authoritative once it arrives.
+                if _DENIAL.search(text) and not out.denials_authoritative:
                     out.permission_denials.append(text[:200])
 
     elif etype == "result":
@@ -64,6 +73,10 @@ def parse_event(ev: dict, out: SessionResult) -> None:
         out.duration_ms = ev.get("duration_ms", out.duration_ms) or 0
         out.num_turns = ev.get("num_turns", out.num_turns) or 0
         out.is_error = bool(ev.get("is_error", out.is_error))
+        if isinstance(ev.get("permission_denials"), list):
+            # The result event lists the real denials; it supersedes the heuristic above.
+            out.permission_denials = [str(d)[:200] for d in ev["permission_denials"]]
+            out.denials_authoritative = True
         if ev.get("result"):
             out.result_text = str(ev["result"]).strip()
             if not out.last_message:
