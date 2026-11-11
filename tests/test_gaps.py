@@ -1142,3 +1142,117 @@ def test_launch_end_to_end_with_a_cumulative_cost_reporting_cli(tmp_path, fake_b
     d._launch(1, tmp_path, "s", "p", "session.jsonl", resume_session="s1")            # reports 1.5
     assert d.ledger.get(1)["cost_usd"] == pytest.approx(1.5)                            # not 3.0
     assert d.ledger.today_cost() == pytest.approx(1.5)
+
+
+# =====================================================================================
+# Deleted tickets: forget their rows, workspaces, branches and logs
+# =====================================================================================
+class _TicketsVK:
+    """exists: task_id -> True (exists) / False (deleted) / None (can't tell)."""
+
+    def __init__(self, exists):
+        self.exists = exists
+
+    def task_exists(self, tid):
+        return self.exists.get(tid, True)
+
+
+class _NT2:
+    def __init__(self):
+        self.rm_calls, self.branch_calls = [], []
+
+    def rm(self, slug):
+        self.rm_calls.append(slug)
+
+    def remove_branch(self, slug):
+        self.branch_calls.append(slug)
+
+
+def _row(led, tid, state):
+    led.upsert_claim(tid, f"task-{tid}-x", f"task-{tid}-x")
+    led.update(tid, state=state)
+
+
+def test_sync_removes_finished_tasks_whose_ticket_is_deleted(tmp_path):
+    led = Ledger(tmp_path / "l.db")
+    _row(led, 1, "blocked"); _row(led, 2, "done"); _row(led, 3, "blocked")
+    for tid in (1, 2, 3):
+        (tmp_path / "logs" / f"task-{tid}-x").mkdir(parents=True)
+    nt = _NT2()
+    gone = cleanup.sync_deleted_tasks(_cfg(tmp_path), led, nt, _TicketsVK({1: False, 2: False}),
+                                      tmp_path / "logs")
+    assert sorted(gone) == [1, 2]
+    assert led.get(1) is None and led.get(2) is None and led.get(3) is not None
+    assert sorted(nt.rm_calls) == ["task-1-x", "task-2-x"] and sorted(nt.branch_calls) == ["task-1-x", "task-2-x"]
+    assert not (tmp_path / "logs" / "task-1-x").exists() and (tmp_path / "logs" / "task-3-x").exists()
+
+
+@pytest.mark.parametrize("state", ["claimed", "working", "testing", "reviewing", "pr_open"])
+def test_sync_never_touches_running_tasks_or_ones_with_an_open_pr(tmp_path, state):
+    led = Ledger(tmp_path / "l.db")
+    _row(led, 1, state)
+    nt = _NT2()
+    assert cleanup.sync_deleted_tasks(_cfg(tmp_path), led, nt, _TicketsVK({1: False}), tmp_path / "logs") == []
+    assert led.get(1) is not None and nt.rm_calls == []
+
+
+def test_sync_treats_an_unreachable_vikunja_as_unknown_not_deleted(tmp_path):
+    led = Ledger(tmp_path / "l.db")
+    _row(led, 1, "blocked")
+    nt = _NT2()
+    assert cleanup.sync_deleted_tasks(_cfg(tmp_path), led, nt, _TicketsVK({1: None}), tmp_path / "logs") == []
+    assert led.get(1) is not None and nt.rm_calls == []
+
+
+def test_task_exists_distinguishes_404_from_other_failures():
+    import requests
+
+    from dispatcher.vikunja import Vikunja, VikunjaError
+
+    vk = Vikunja("http://x/api/v1", "t")
+    results = iter([{"id": 1}, VikunjaError("gone", status=404), VikunjaError("boom", status=500),
+                    VikunjaError("denied", status=403), requests.ConnectionError("down")])
+
+    def fake(task_id):
+        r = next(results)
+        if isinstance(r, Exception):
+            raise r
+        return r
+    vk.task = fake
+    assert [vk.task_exists(1) for _ in range(5)] == [True, False, None, None, None]
+
+
+def test_nightly_reports_removed_tickets(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    led = Ledger(tmp_path / "l.db")
+    _row(led, 1, "blocked")
+    nt = Ntree(tmp_path)
+    monkeypatch.setattr(nt, "rm", lambda s: None)
+    monkeypatch.setattr(nt, "remove_branch", lambda s: None)
+    monkeypatch.setattr(nt, "clear_stale_git_locks", lambda *a, **k: [])
+    monkeypatch.setattr(nt, "doctor", lambda: subprocess.CompletedProcess([], 0, "", ""))
+    out = cleanup.nightly(cfg, nt, None, led, tmp_path / "logs", vikunja=_TicketsVK({1: False}))
+    assert "removed 1 task(s) whose ticket was deleted: #1" in out and led.get(1) is None
+
+
+def test_startup_sync_failure_never_blocks_the_dispatcher(tmp_path, monkeypatch):
+    d = _dispatcher(tmp_path)
+    monkeypatch.setattr(dmod, "sync_deleted_tasks", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("vikunja down")))
+    monkeypatch.setattr(d, "refresh_board", lambda: None)
+    monkeypatch.setattr(d, "reap_orphans", lambda: None)
+    monkeypatch.setattr(d.ntree, "clear_stale_git_locks", list)
+    monkeypatch.setattr(d, "_guarded_tick", lambda: d._stop.set())
+    monkeypatch.setattr(dmod.signal, "signal", lambda *a: None)
+    d.run()                                  # would raise if the sync error escaped
+    assert d._stop.is_set()
+
+
+def test_dashboard_sync_reports_what_it_removed(tmp_path, monkeypatch):
+    from dispatcher import dashboard
+
+    led = Ledger(tmp_path / "l.db")
+    _row(led, 7, "blocked")
+    monkeypatch.setattr(cleanup, "sync_deleted_tasks", lambda *a, **k: [7, 9])
+    assert dashboard.sync_deleted(_cfg(tmp_path), led) == "removed #7, #9"
+    monkeypatch.setattr(cleanup, "sync_deleted_tasks", lambda *a, **k: [])
+    assert dashboard.sync_deleted(_cfg(tmp_path), led) == "nothing to remove"

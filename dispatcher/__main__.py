@@ -138,9 +138,21 @@ def cmd_nightly(args) -> int:
     ntree = Ntree(cfg.repo_path, cfg.base_branch)
     slack = Slack(cfg.slack_webhook)
     from .db import Ledger
+    from .vikunja import Vikunja
 
-    summary = run_nightly(cfg, ntree, slack, Ledger(cfg.db_path))
+    summary = run_nightly(cfg, ntree, slack, Ledger(cfg.db_path),
+                          vikunja=Vikunja(cfg.vikunja_url, cfg.vikunja_token))
     slack.nightly(summary)
+    return 0
+
+
+def cmd_sync(args) -> int:
+    """Remove ledger rows (and workspaces/branches/logs) of tickets deleted in Vikunja."""
+    from . import dashboard
+    from .db import Ledger
+
+    cfg = _load(args.env)
+    print(dashboard.sync_deleted(cfg, Ledger(cfg.db_path)))
     return 0
 
 
@@ -173,6 +185,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("selftest", help="verify config and connectivity").set_defaults(func=cmd_selftest)
     sub.add_parser("cleanup", help="run one PR-close cleanup pass").set_defaults(func=cmd_cleanup)
     sub.add_parser("nightly", help="run the nightly maintenance pass").set_defaults(func=cmd_nightly)
+    sub.add_parser("sync", help="forget tasks whose Vikunja ticket was deleted").set_defaults(func=cmd_sync)
     dash = sub.add_parser("dashboard", help="terminal control panel (status + config + controls)")
     dash.add_argument("--once", action="store_true", help="print a one-shot text status and exit (no TUI)")
     dash.set_defaults(func=cmd_dashboard)

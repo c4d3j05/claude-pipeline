@@ -23,7 +23,9 @@ log = get("vikunja")
 
 
 class VikunjaError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class Vikunja:
@@ -39,7 +41,8 @@ class Vikunja:
         url = f"{self.base}{path}"
         r = self.s.request(method, url, timeout=self.timeout, **kw)
         if not r.ok:
-            raise VikunjaError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
+            raise VikunjaError(f"{method} {path} -> {r.status_code}: {r.text[:300]}",
+                               status=r.status_code)
         if r.text.strip():
             return r.json()
         return None
@@ -81,6 +84,20 @@ class Vikunja:
     # --- tasks -----------------------------------------------------------
     def task(self, task_id: int) -> dict:
         return self._req("GET", f"/tasks/{task_id}")
+
+    def task_exists(self, task_id: int) -> bool | None:
+        """True if the ticket exists, False if it is deleted/trashed (404), None if unknown.
+
+        Only a clear 404 means "gone"; any other failure (network, 5xx, auth) is "unknown"
+        so a Vikunja outage can never be mistaken for a mass deletion.
+        """
+        try:
+            self.task(task_id)
+            return True
+        except VikunjaError as e:
+            return False if e.status == 404 else None
+        except requests.RequestException:
+            return None
 
     def task_labels(self, task: dict) -> set[str]:
         return {l["title"].strip().lower() for l in (task.get("labels") or [])}

@@ -81,6 +81,7 @@ class DashboardApp(App):
         Binding("r", "retry", "Retry"),
         Binding("c", "cancel", "Cancel"),
         Binding("o", "open_pr", "Open PR"),
+        Binding("s", "sync", "Sync deleted"),
         Binding("e", "config", "Config"),
     ]
 
@@ -115,7 +116,7 @@ class DashboardApp(App):
         self.query_one("#summary", Static).update(
             f"[b]claude-pipeline[/]   workers [b]{st['active']}/{st['max_workers']}[/]   "
             f"spend [{cap_color}]${st['today_cost']:.2f}[/]/${st['cap']:.0f} today   {pause}\n"
-            f"[dim]p pause · r retry · c cancel · o open PR · e config · q quit[/]"
+            f"[dim]p pause · r retry · c cancel · o open PR · s sync deleted · e config · q quit[/]"
         )
 
         table = self.query_one("#tasks", DataTable)
@@ -186,6 +187,13 @@ class DashboardApp(App):
             self.notify(f"Task {tid}: {msg}")
         except Exception as e:  # noqa: BLE001
             self.notify(f"Retry failed: {e}", severity="error")
+        self.refresh_data()
+
+    def action_sync(self) -> None:
+        try:
+            self.notify("Sync: " + dash.sync_deleted(self.cfg, self.ledger))
+        except Exception as e:  # noqa: BLE001
+            self.notify(f"Sync failed: {e}", severity="error")
         self.refresh_data()
 
     def action_config(self) -> None:

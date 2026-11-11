@@ -151,6 +151,16 @@ def retry_task(cfg: Config, ledger: Ledger, task_id: int) -> str:
     return "re-queued"
 
 
+def sync_deleted(cfg: Config, ledger: Ledger) -> str:
+    """Drop rows (and workspaces/branches/logs) of tickets deleted in Vikunja."""
+    from .cleanup import sync_deleted_tasks
+    from .ntree import Ntree
+
+    gone = sync_deleted_tasks(cfg, ledger, Ntree(cfg.repo_path, cfg.base_branch),
+                              Vikunja(cfg.vikunja_url, cfg.vikunja_token))
+    return ("removed " + ", ".join(f"#{t}" for t in gone)) if gone else "nothing to remove"
+
+
 def set_config(env_file: str, updates: dict[str, str]) -> None:
     from . import config as cfgmod
     cfgmod.set_values(env_file, updates)
