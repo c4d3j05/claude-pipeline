@@ -159,27 +159,54 @@ def push_and_create(
     return cp.stdout.strip().splitlines()[-1]
 
 
-def open_worker_prs(cfg: Config) -> list[dict]:
-    """List open PRs with the pipeline's label. Used by the cleanup poller."""
+# Fields every token can read. CI status (`statusCheckRollup`) needs extra permission
+# (checks/statuses: read) that fine-grained tokens often lack; asking for it in the same
+# call makes the WHOLE call fail, which would also break closed-PR cleanup.
+_CORE_FIELDS = "number,state,headRefName,url,mergedAt,mergeCommit,mergeable,reviewDecision"
+_checks_unavailable = False
+
+
+def _gh_pr_list(cfg: Config, fields: str, state: str = "all") -> list[dict] | None:
     cp = subprocess.run(
-        [
-            "gh", "pr", "list",
-            "--label", cfg.pr_label,
-            "--state", "all",
-            "--json",
-            "number,state,headRefName,url,mergedAt,mergeCommit,mergeable,reviewDecision,statusCheckRollup",
-            "--limit", "500",
-        ],
-        cwd=cfg.repo_path,
-        capture_output=True,
-        text=True,
-        timeout=120,
+        ["gh", "pr", "list", "--label", cfg.pr_label, "--state", state,
+         "--json", fields, "--limit", "500"],
+        cwd=cfg.repo_path, capture_output=True, text=True, timeout=120,
         env=clean_env("github"),
     )
     if cp.returncode != 0:
-        log.warning("gh pr list failed: %s", cp.stderr.strip())
-        return []
+        return None if fields == _CORE_FIELDS else []
     try:
         return json.loads(cp.stdout or "[]")
     except json.JSONDecodeError:
+        return None if fields == _CORE_FIELDS else []
+
+
+def open_worker_prs(cfg: Config) -> list[dict]:
+    """List the pipeline's PRs (all states). Used by cleanup and the PR watch.
+
+    CI status is added best-effort in a second call, so a token that cannot read it still
+    gets everything else (cleanup, conflicts, requested changes).
+    """
+    global _checks_unavailable
+    rows = _gh_pr_list(cfg, _CORE_FIELDS)
+    if rows is None:
+        log.warning("gh pr list failed; treating as no PRs this round")
         return []
+    if _checks_unavailable or not any(r.get("state") == "OPEN" for r in rows):
+        return rows
+    checks = _gh_pr_list(cfg, "number,statusCheckRollup", state="open")
+    if not checks and any(r.get("state") == "OPEN" for r in rows):
+        probe = subprocess.run(
+            ["gh", "pr", "list", "--label", cfg.pr_label, "--state", "open",
+             "--json", "number,statusCheckRollup", "--limit", "1"],
+            cwd=cfg.repo_path, capture_output=True, text=True, timeout=60,
+            env=clean_env("github"))
+        if probe.returncode != 0:
+            _checks_unavailable = True
+            log.info("token cannot read CI status (statusCheckRollup); PR watch will report "
+                     "conflicts and requested changes only")
+    by_number = {c["number"]: c.get("statusCheckRollup") for c in checks or []}
+    for r in rows:
+        if r.get("number") in by_number:
+            r["statusCheckRollup"] = by_number[r["number"]]
+    return rows
