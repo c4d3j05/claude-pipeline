@@ -27,6 +27,9 @@ FAKE_CLAUDE = """#!/usr/bin/env python3
 import json, os, sys, time
 prompt = sys.stdin.read()
 open(os.environ["FAKE_PROMPT_OUT"], "w").write(prompt)
+if os.environ.get("FAKE_ENV_OUT"):
+    open(os.environ["FAKE_ENV_OUT"], "w").write(json.dumps(
+        {"env": {k: os.environ.get(k) for k in ("NTREE_WORKSPACE", "PORT")}, "argv": sys.argv}))
 mode = os.environ.get("FAKE_MODE", "ok")
 print(json.dumps({"type": "system", "subtype": "init", "session_id": "s1"}), flush=True)
 if mode == "hang":
@@ -502,3 +505,57 @@ def test_kill_group_still_sigkills_a_process_that_ignores_sigterm(tmp_path):
     t0 = time.monotonic()
     kill_group(child.pid, grace=1, proc=child)
     assert child.wait(timeout=5) != 0 and time.monotonic() - t0 < 10
+
+
+# --- worker environment / reviewer settings / restart clock ----------------------------------
+def test_worker_env_comes_from_env_workspace_with_slug_fallback(tmp_path):
+    (tmp_path / ".env.workspace").write_text("NTREE_WORKSPACE=ws1\nPORT=8102\nAPI_PORT=8102\n")
+    assert dmod.workspace_env(tmp_path, "slug")["PORT"] == "8102"
+    assert dmod.workspace_env(tmp_path, "slug")["NTREE_WORKSPACE"] == "ws1"
+    empty = tmp_path / "empty"; empty.mkdir()
+    assert dmod.workspace_env(empty, "slug") == {"NTREE_WORKSPACE": "slug"}
+
+
+def test_launched_worker_actually_receives_workspace_env(tmp_path, fake_bin, monkeypatch):
+    import json
+
+    out = tmp_path / "env.json"
+    monkeypatch.setenv("FAKE_ENV_OUT", str(out))
+    monkeypatch.delenv("NTREE_WORKSPACE", raising=False)
+    _launch(tmp_path, extra_env={"NTREE_WORKSPACE": "ws1", "PORT": "8102"})
+    assert json.loads(out.read_text())["env"] == {"NTREE_WORKSPACE": "ws1", "PORT": "8102"}
+
+
+def test_dispatcher_launch_passes_worktree_env_to_worker(tmp_path, monkeypatch):
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(1, "task-1-x", "task-1-x")
+    (tmp_path / ".env.workspace").write_text("NTREE_WORKSPACE=task-1-x\nPORT=8105\n")
+    seen = {}
+    monkeypatch.setattr(dmod, "launch", lambda **kw: seen.update(kw) or (SessionResult(), 0))
+    d._launch(1, tmp_path, "task-1-x", "p", "session.jsonl")
+    assert seen["extra_env"] == {"NTREE_WORKSPACE": "task-1-x", "PORT": "8105"}
+
+
+def test_reviewer_gets_settings_without_the_stop_hook(tmp_path, repo, fake_bin, monkeypatch):
+    import json
+
+    _change(repo)
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "worker-settings.json").write_text(json.dumps(
+        {"permissions": {"deny": ["Bash(rm -rf*)"]}, "hooks": {"Stop": [{"hooks": []}]}}))
+    out = tmp_path / "args.json"
+    monkeypatch.setenv("FAKE_ENV_OUT", str(out))
+    monkeypatch.setenv("FAKE_TEXT", '{"verdict":"pass","findings":[]}')
+    adversarial_review(_cfg(tmp_path, repo), repo, "spec", tmp_path / "logs" / "r.jsonl")
+    argv = json.loads(out.read_text())["argv"]
+    used = json.loads(Path(argv[argv.index("--settings") + 1]).read_text())
+    assert "hooks" not in used and used["permissions"]["deny"] == ["Bash(rm -rf*)"]
+
+
+def test_requeue_restarts_the_elapsed_clock(tmp_path):
+    led = Ledger(tmp_path / "l.db")
+    led.upsert_claim(1, "s", "s")
+    led.conn.execute("UPDATE tasks SET started_at='2020-01-01T00:00:00' WHERE task_id=1")
+    led.conn.commit()
+    led.upsert_claim(1, "s", "s")
+    assert led.get(1)["started_at"] > "2020-01-01T00:00:00"

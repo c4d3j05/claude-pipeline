@@ -30,6 +30,7 @@ def launch(
     read_only: bool = False,
     resume_session: str = "",
     on_pid=None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[SessionResult, int]:
     """Run `claude -p` in `worktree`, tee the stream to `session_log`, and parse it.
 
@@ -76,7 +77,7 @@ def launch(
             text=True,
             bufsize=1,
             start_new_session=True,  # own process group, so we can kill children too
-            env=clean_env(),
+            env={**clean_env(), **(extra_env or {})},
         )
 
         def _expire() -> None:

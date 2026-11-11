@@ -20,6 +20,7 @@ from .db import ACTIVE_STATES, Ledger
 from .log import get
 from .notify import Slack
 from .ntree import Ntree, NtreeError
+from .procenv import load_env_file
 from .prompt import (
     commit_or_discard_prompt,
     retry_prompt_review,
@@ -244,6 +245,7 @@ class Dispatcher:
                 permission_mode=self.cfg.permission_mode,
                 resume_session=resume_session,
                 on_pid=lambda p: self.ledger.update(tid, pid=p),
+                extra_env=workspace_env(worktree, slug),
             )
         finally:
             self.ledger.update(tid, pid=None)  # a stale PID could be reused by another process
@@ -446,6 +448,16 @@ class Dispatcher:
                 log.warning("could not move interrupted task %s to blocked: %s", tid, e)
             self.comment(tid, "blocked: dispatcher restarted; worker interrupted — "
                               "move this card back to Ready to retry")
+
+
+def workspace_env(worktree: Path, slug: str) -> dict[str, str]:
+    """The per-workspace environment `ntree` wrote (NTREE_WORKSPACE, PORT, API_PORT, …).
+
+    The dispatcher launches `claude` directly, not through `ntree run`, so without this the
+    worker's Stop hook (`ntree run "$NTREE_WORKSPACE" -- …`) fails at once and the worker has
+    no per-workspace ports or database name. NTREE_WORKSPACE falls back to the slug.
+    """
+    return {"NTREE_WORKSPACE": slug, **load_env_file(worktree / ".env.workspace")}
 
 
 def _fmt_findings(findings: list[dict]) -> str:
