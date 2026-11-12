@@ -142,3 +142,61 @@ def test_migrations_serialise_tasks(tmp_path):
     d = _world(tmp_path, [_ready(2, "backend/app/x/migrations/0003_b.py")],
                held=[(1, "working", ["backend/app/y/migrations/0003_a.py"], None)])
     assert ids(d) == []
+
+
+# --- keeping the held files current ------------------------------------------------------------
+def test_files_are_snapshotted_after_each_passing_gate(tmp_path, monkeypatch):
+    from tests.test_gaps import _dispatcher
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(5, "s", "s")
+    monkeypatch.setattr(d, "_verify", lambda *a: None)
+    monkeypatch.setattr("dispatcher.daemon.head_sha", lambda wt: "abc")
+    monkeypatch.setattr(prmod, "changed_files", lambda wt, base: ["a.py", "unplanned/b.py"])
+    assert d._verify_and_remember(5, tmp_path, "s", None, "main") is None
+    assert touches.load(d.ledger.get(5)["changed"]) == ["a.py", "unplanned/b.py"]
+    monkeypatch.setattr(d, "_verify", lambda *a: ("block", "red"))
+    monkeypatch.setattr(prmod, "changed_files", lambda wt, base: ["zzz.py"])
+    d._verify_and_remember(5, tmp_path, "s", None, "main")             # a failed gate records nothing
+    assert touches.load(d.ledger.get(5)["changed"]) == ["a.py", "unplanned/b.py"]
+
+
+def test_a_snapshot_failure_never_fails_the_task(tmp_path, monkeypatch):
+    from tests.test_gaps import _dispatcher
+    d = _dispatcher(tmp_path)
+    d.ledger.upsert_claim(5, "s", "s")
+
+    def boom(*a):
+        raise OSError("git gone")
+    monkeypatch.setattr(prmod, "changed_files", boom)
+    d._snapshot_changed(5, tmp_path, "main")                           # no exception
+    d._snapshot_changed(5, tmp_path, None)
+
+
+def test_open_pr_files_are_read_from_gh(tmp_path, monkeypatch):
+    from tests.test_gaps import _cfg
+    monkeypatch.setattr(prmod, "_gh_pr_list", lambda cfg, fields, state="all": [
+        {"number": 2, "files": [{"path": "a.py"}, {"path": "b/c.py"}]}, {"number": 3, "files": None}])
+    assert prmod.open_pr_files(_cfg(tmp_path)) == {2: ["a.py", "b/c.py"], 3: []}
+
+
+def test_pr_watch_refreshes_the_held_files_when_the_pr_changes(tmp_path, monkeypatch):
+    from dispatcher import cleanup
+    from tests.test_gaps import _cfg, _pr_open_row, _VKStub
+    led = Ledger(tmp_path / "l.db")
+    _pr_open_row(led)
+    led.update(7, changed=touches.dump(["a.py"]))
+    pr = {"number": 2, "state": "OPEN", "headRefName": "task-7-x", "url": "https://gh/pr/2"}
+    slack = type("S", (), {"pr_needs_attention": lambda *a: None})()
+    monkeypatch.setattr(cleanup, "open_worker_prs", lambda cfg: [pr])
+    monkeypatch.setattr(cleanup, "open_pr_files", lambda cfg: {2: ["a.py", "b.py"]})
+    cleanup.watch_open_prs(_cfg(tmp_path), led, _VKStub(), slack)
+    assert touches.load(led.get(7)["changed"]) == ["a.py", "b.py"]
+    monkeypatch.setattr(cleanup, "open_pr_files", lambda cfg: {})       # unreadable: keep what we have
+    cleanup.watch_open_prs(_cfg(tmp_path), led, _VKStub(), slack)
+    assert touches.load(led.get(7)["changed"]) == ["a.py", "b.py"]
+
+
+def test_settings_files_are_hot_by_default(tmp_path):
+    from tests.test_gaps import _cfg
+    assert touches.clashes(["backend/config/settings/base.py"], ["backend/config/settings/prod.py"],
+                           _cfg(tmp_path).hot_paths)

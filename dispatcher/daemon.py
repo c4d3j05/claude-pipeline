@@ -534,13 +534,26 @@ class Dispatcher:
         except GateTimeout as e:
             return ("block", f"gate: {e}")
 
-    def _verify_and_remember(self, tid, worktree, slug, run: _Run) -> Stop | None:
+    def _verify_and_remember(self, tid, worktree, slug, run: _Run, base_ref: str | None = None) -> Stop | None:
         """_verify, then record the commit the tests passed on (lets a review-only recovery
-        skip the 11-minute gate when nothing has changed)."""
+        skip the 11-minute gate when nothing has changed) and the files changed so far, so other
+        tasks are held back by what this one really touches, not only by what was planned."""
         stop = self._verify(tid, worktree, slug, run)
         if stop is None:
             self.ledger.update(tid, tested_sha=head_sha(worktree))
+            self._snapshot_changed(tid, worktree, base_ref)
         return stop
+
+    def _snapshot_changed(self, tid, worktree, base_ref: str | None) -> None:
+        """Record the files the branch has changed so far. Never fails the task."""
+        if not base_ref:
+            return
+        try:
+            files = prmod.changed_files(worktree, base_ref)
+            if files:
+                self.ledger.update(tid, changed=touches.dump(files))
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not record the changed files of task %s: %s", tid, e)
 
     def _baseline(self, tid, worktree, slug, base_ref: str) -> Stop | None:
         """Run the gate on the untouched base once per commit; red base = environment problem.
@@ -759,7 +772,7 @@ class Dispatcher:
                               "to the review")
             stop = None
         else:
-            stop = self._verify_and_remember(tid, worktree, slug, run)
+            stop = self._verify_and_remember(tid, worktree, slug, run, base_ref)
         if stop:
             return self._halt(tid, slug, stop)
 
@@ -790,7 +803,7 @@ class Dispatcher:
             stop = self._resume_step(
                 tid, worktree, slug, run, retry_prompt_review(review.get("findings", [])))
             if not stop:
-                stop = self._verify_and_remember(tid, worktree, slug, run)  # tests + clean tree again
+                stop = self._verify_and_remember(tid, worktree, slug, run, base_ref)  # tests + clean tree again
             if stop:
                 return self._halt(tid, slug, stop)
             self.ledger.update(tid, state="reviewing")

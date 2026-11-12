@@ -7,12 +7,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from . import touches
 from .config import Config
 from .db import Ledger
 from .log import get
 from .notify import Slack
 from .ntree import Ntree
-from .pr import open_worker_prs
+from .pr import open_pr_files, open_worker_prs
 from .procenv import clean_env
 
 log = get("cleanup")
@@ -86,6 +87,7 @@ def watch_open_prs(cfg: Config, ledger: Ledger, vikunja, slack: Slack) -> None:
     The pipeline never touches an open PR, so without this a PR can rot unnoticed. Posts
     a card comment (and Slack) once per change of status, not on every poll.
     """
+    files = None
     for pr in open_worker_prs(cfg):
         if pr.get("state") != "OPEN":
             continue
@@ -93,6 +95,12 @@ def watch_open_prs(cfg: Config, ledger: Ledger, vikunja, slack: Slack) -> None:
         row = ledger.get(task_id) if task_id is not None else None
         if row is None or row["state"] != "pr_open" or row["pr_url"] != pr.get("url"):
             continue
+        # Keep the files this task holds in step with its PR, which anyone can push to.
+        if files is None:
+            files = open_pr_files(cfg)
+        now = files.get(pr.get("number"))
+        if now and touches.dump(sorted(now)) != touches.dump(sorted(touches.load(row["changed"]))):
+            ledger.update(task_id, changed=touches.dump(now))
         problem = pr_problem(pr)
         if problem == (row["pr_status"] or ""):
             continue

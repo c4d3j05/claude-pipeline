@@ -187,6 +187,14 @@ def _gh_pr_list(cfg: Config, fields: str, state: str = "all") -> list[dict] | No
         return None if fields == _CORE_FIELDS else []
 
 
+def open_pr_files(cfg: Config) -> dict[int, list[str]]:
+    """{PR number: changed file paths} for the open pipeline PRs. Best effort: {} when unreadable."""
+    out: dict[int, list[str]] = {}
+    for r in _gh_pr_list(cfg, "number,files", state="open") or []:
+        out[r["number"]] = [f["path"] for f in r.get("files") or [] if f.get("path")]
+    return out
+
+
 def open_worker_prs(cfg: Config) -> list[dict]:
     """List the pipeline's PRs (all states). Used by cleanup and the PR watch.
 
