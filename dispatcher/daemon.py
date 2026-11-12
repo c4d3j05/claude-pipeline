@@ -72,7 +72,11 @@ _AUTH = re.compile(
     r"oauth token|credit balance|\b401\b", re.IGNORECASE)
 TICK_FAILURES_BEFORE_ALERT = 3
 # Blocks that leave a worker's progress in the workspace: a re-queue resumes instead of wiping.
-_RESUMABLE = ("cap: turns", "cap: wall-clock", "cap: task cost")
+# Blocks that keep the workspace and session on a re-queue. Permission denials are here because
+# the worker is usually done (or nearly) when it starts poking at the environment; throwing away its
+# committed work to start again costs a whole worker run. `_resume_workspace` still starts fresh if
+# there is no work to resume.
+_RESUMABLE = ("cap: turns", "cap: wall-clock", "cap: task cost", "permission denials")
 # What a task is doing, by ledger state, for the "still working" heartbeat.
 _STAGE = {"claimed": "setting up", "working": "the worker is coding", "testing": "running tests",
           "reviewing": "under review"}
