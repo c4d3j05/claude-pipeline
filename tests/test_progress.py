@@ -83,7 +83,7 @@ def test_config_reads_the_progress_settings(tmp_path):
     assert cfg.notify_progress == "all" and cfg.progress_interval_min == 0
     env.write_text(base)
     cfg = cfgmod.load(str(env))
-    assert cfg.notify_progress == "all" and cfg.progress_interval_min == 10
+    assert cfg.notify_progress == "all" and cfg.progress_interval_min == 30
 
 
 # --- what the dispatcher says ------------------------------------------------------------------
@@ -200,3 +200,36 @@ def test_claiming_announces_the_pickup(tmp_path):
     d.vk = type("VK", (), {"task": lambda self, tid: {"description": ""}})()
     d.claim_and_dispatch({"id": 7, "title": "Add the thing", "description": ""})
     assert d.slack.lines and "Picked up task 7" in d.slack.lines[0][1] and "Add the thing" in d.slack.lines[0][1]
+
+
+def test_a_recent_message_suppresses_the_heartbeat(tmp_path):
+    import dataclasses
+    import time
+
+    d = _dispatcher(tmp_path)
+    d.slack = Said()
+    d.cfg = dataclasses.replace(d.cfg, progress_interval_min=1)
+    d.ledger.upsert_claim(7, "s", "s")
+    d.ledger.update(7, state="testing")
+
+    class Ticks(threading.Event):
+        def __init__(self, n):
+            super().__init__()
+            self.n = n
+
+        def wait(self, timeout=None):
+            self.n -= 1
+            return self.n < 0
+
+    d._say(7, "Tests passed")                                        # the task just spoke
+    d.slack.lines.clear()
+    d._heartbeat(7, Ticks(2))
+    assert d.slack.lines == []                                       # no "still working" on top of it
+    d._last_said[7] = time.monotonic() - 3600                        # an hour of silence
+    d._heartbeat(7, Ticks(1))
+    assert len(d.slack.lines) == 1 and "Still working" in d.slack.lines[0][1]
+
+
+def test_the_default_heartbeat_is_every_thirty_minutes():
+    from dispatcher.config import Config
+    assert Config.__dataclass_fields__["progress_interval_min"].default == 30
