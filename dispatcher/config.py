@@ -99,6 +99,12 @@ class Config:
     review_max_turns: int = 30
     # Run the gate once per base commit before spending on a worker (red base = env problem).
     baseline_check: bool = True
+    # Progress messages in Slack: where a task's stage-by-stage updates go.
+    #   all    = its planner thread, or the webhook channel if it has none (default)
+    #   thread = only tasks that have a planner thread
+    #   off    = none (PR opened / blocked / merged are always sent)
+    notify_progress: str = "all"
+    progress_interval_min: int = 10   # "still working" heartbeat during long stages; 0 = none
 
     # Housekeeping
     log_retention_days: int = 30
@@ -161,6 +167,9 @@ def load(env_file: str | None = ".env") -> Config:
         max_continuations=_int(src, "MAX_CONTINUATIONS", 2),
         review_max_turns=max(4, _int(src, "REVIEW_MAX_TURNS", 30)),
         baseline_check=_str(src, "BASELINE_CHECK", "true").lower() not in ("0", "false", "no", "off"),
+        notify_progress=(_str(src, "NOTIFY_PROGRESS", "all").lower()
+                         if _str(src, "NOTIFY_PROGRESS", "all").lower() in ("all", "thread", "off") else "all"),
+        progress_interval_min=max(0, _int(src, "PROGRESS_INTERVAL_MIN", 10)),
         db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),
         slack_bot_token=_str(src, "SLACK_BOT_TOKEN"),

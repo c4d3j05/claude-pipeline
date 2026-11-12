@@ -73,6 +73,10 @@ _AUTH = re.compile(
 TICK_FAILURES_BEFORE_ALERT = 3
 # Blocks that leave a worker's progress in the workspace: a re-queue resumes instead of wiping.
 _RESUMABLE = ("cap: turns", "cap: wall-clock", "cap: task cost")
+# What a task is doing, by ledger state, for the "still working" heartbeat.
+_STAGE = {"claimed": "setting up", "working": "the worker is coding", "testing": "running tests",
+          "reviewing": "under review"}
+
 # Blocks where the worker's job was already done: a re-queue only re-runs the gates.
 _GATES_ONLY = ("environment:", "review error:")
 
@@ -85,7 +89,8 @@ class Dispatcher:
         self.env_file = env_file
         self.vk = Vikunja(cfg.vikunja_url, cfg.vikunja_token)
         self.ledger = Ledger(cfg.db_path)
-        self.slack = Slack(cfg.slack_webhook, cfg.slack_bot_token, thread_for=self.ledger.thread)
+        self.slack = Slack(cfg.slack_webhook, cfg.slack_bot_token, thread_for=self.ledger.thread,
+                           progress=cfg.notify_progress)
         self.ntree = Ntree(cfg.repo_path, cfg.base_branch)
         # Pool has a fixed ceiling; the tick gate limits real concurrency to
         # cfg.max_workers, so changing MAX_WORKERS live (hot-reload) takes effect.
@@ -126,6 +131,13 @@ class Dispatcher:
             self.vk.comment(task_id, f"<p>{text}</p>")
         except Exception as e:  # noqa: BLE001
             log.warning("comment on task %s failed: %s", task_id, e)
+
+    def _say(self, task_id: int, text: str) -> None:
+        """A progress update for the human. Never raises: Slack must not affect a task."""
+        try:
+            self.slack.progress(task_id, text)
+        except Exception as e:  # noqa: BLE001
+            log.warning("progress message for task %s failed: %s", task_id, e)
 
     def task_link(self, task_id: int) -> str:
         root = self.cfg.vikunja_url.rsplit("/api/", 1)[0]
@@ -287,6 +299,7 @@ class Dispatcher:
         self.ledger.upsert_claim(tid, slug, slug)
         self._remember_thread(task)
         log.info("claimed task %s -> %s", tid, slug)
+        self._say(tid, f":inbox_tray: Picked up task {tid}: *{title}*. Setting up an isolated workspace.")
         self.pool.submit(self._safe_pipeline, task, slug)
 
     def _remember_thread(self, task: dict) -> None:
@@ -308,11 +321,35 @@ class Dispatcher:
     # --- per-task pipeline ----------------------------------------------
     def _safe_pipeline(self, task: dict, slug: str) -> None:
         tid = task["id"]
+        done = threading.Event()
+        threading.Thread(target=self._heartbeat, args=(tid, done), daemon=True,
+                         name=f"heartbeat-{tid}").start()
         try:
             self.run_pipeline(task, slug)
         except Exception as e:
             log.exception("pipeline crashed for task %s", tid)
             self._block(tid, f"pipeline error: {e}")
+        finally:
+            done.set()
+
+    def _heartbeat(self, tid: int, done: threading.Event) -> None:
+        """While a task runs, say every PROGRESS_INTERVAL_MIN minutes that it is still alive: a
+        long worker session or test run is otherwise silent for tens of minutes."""
+        began = time.monotonic()
+        while True:
+            interval = self.cfg.progress_interval_min * 60
+            if interval <= 0:
+                if done.wait(60):                     # re-read the setting: it hot-reloads
+                    return
+                continue
+            if done.wait(interval):
+                return
+            row = self.ledger.get(tid)
+            if row is None or row["state"] not in _STAGE:
+                return
+            self._say(tid, f":hourglass_flowing_sand: Still working on task {tid}: "
+                           f"{_STAGE[row['state']]} · {(time.monotonic() - began) / 60:.0f} min "
+                           f"since pickup · ${row['cost_usd']:.2f} spent.")
 
     def _session_log(self, slug: str, name: str) -> Path:
         return self.logs_root / slug / name
@@ -340,6 +377,10 @@ class Dispatcher:
         backoff instead of blocking the task; every attempt's cost is accounted.
         """
         attempts = 1 + max(0, self.cfg.transient_retries)
+        started = time.monotonic()
+        self._say(tid, f":hammer_and_wrench: Worker {'resumed' if resume_session else 'started'} "
+                       f"({self.cfg.worker_model}; up to {self.cfg.max_turns} turns / "
+                       f"{self.cfg.wall_clock_limit_min} min).")
         for attempt in range(attempts):
             try:
                 result, rc = launch(
@@ -369,6 +410,9 @@ class Dispatcher:
                               f"({attempt + 1}/{attempts - 1})")
             if self._stop.wait(delay):
                 break
+        row = self.ledger.get(tid)
+        self._say(tid, f":white_flag: Worker finished after {(time.monotonic() - started) / 60:.0f} min "
+                       f"(${row['cost_usd']:.2f} spent so far).")
         return result, rc
 
     def _is_transient(self, result, rc: int) -> bool:
@@ -430,6 +474,16 @@ class Dispatcher:
         run.session_id = result.session_id or run.session_id  # resume may fork a new id
         return self._stop_reason(tid, result, rc)
 
+    def _tests(self, tid: int, slug: str) -> tuple[bool, str]:
+        """The test gate, announced: it is the longest silent stretch of a task."""
+        self._say(tid, ":test_tube: Running the test suite on the worker's changes.")
+        t0 = time.monotonic()
+        green, tail = self._gate(slug)
+        mins = (time.monotonic() - t0) / 60
+        self._say(tid, f":white_check_mark: Tests passed ({mins:.0f} min)." if green
+                  else f":x: Tests failed ({mins:.0f} min).")
+        return green, tail
+
     def _gate(self, slug: str) -> tuple[bool, str]:
         """Run the test gate, at most MAX_GATES at a time (the queue wait is not timed)."""
         with self._gate_sem:
@@ -463,7 +517,14 @@ class Dispatcher:
             with self._baseline_lock:  # single-flight: concurrent tasks reuse the result
                 row = self.ledger.get_baseline(sha, boot)
                 if row is None:
+                    self._say(tid, ":microscope: Checking that the base branch passes its tests before "
+                                   "any work starts (the whole suite runs once per commit; this can "
+                                   "take several minutes).")
+                    t0 = time.monotonic()
                     green, tail = self._gate(slug)
+                    if green:
+                        self._say(tid, f":white_check_mark: Base branch is green "
+                                       f"({(time.monotonic() - t0) / 60:.0f} min).")
                     problem = None if green else infra.detect(tail)
                     if problem:
                         # A down service says nothing about the base commit: don't cache it.
@@ -472,6 +533,9 @@ class Dispatcher:
                     self.ledger.set_baseline(sha, green, tail, boot)
                 else:
                     green, tail = bool(row["green"]), row["tail"]
+                    if green:
+                        self._say(tid, ":white_check_mark: Base branch already verified green for "
+                                       "this commit.")
         except GateTimeout as e:
             return ("block", f"baseline: {e}")
         if green:
@@ -493,7 +557,7 @@ class Dispatcher:
         while True:
             if self.ledger.cancel_requested(tid):
                 return ("cancel", "")
-            green, tail = self._gate(slug)
+            green, tail = self._tests(tid, slug)
             while not green:
                 problem = infra.detect(tail)
                 if problem:
@@ -503,7 +567,7 @@ class Dispatcher:
                         rerun_done = True
                         self.comment(tid, f"gate: {problem.summary}, but it answers now - "
                                           f"re-running the gate without using a retry")
-                        green, tail = self._gate(slug)
+                        green, tail = self._tests(tid, slug)
                         continue
                     return ("block", (f"environment: {problem.summary}. Start it, then re-queue: "
                                       f"the work is saved and only the gates re-run.\n{tail[-400:]}"))
@@ -513,12 +577,14 @@ class Dispatcher:
                 n = row["test_retries"] + 1
                 self.ledger.update(tid, test_retries=n)
                 self.comment(tid, f"gate: tests red, retry {n}/{cfg.max_test_retries}")
+                self._say(tid, f":repeat: Sending the failing tests back to the worker "
+                               f"(retry {n}/{cfg.max_test_retries}).")
                 stop = self._resume_step(tid, worktree, slug, run, retry_prompt_tests(tail))
                 if stop:
                     return stop
                 if self.ledger.cancel_requested(tid):
                     return ("cancel", "")
-                green, tail = self._gate(slug)
+                green, tail = self._tests(tid, slug)
             if not working_tree_dirty(worktree):
                 return None
             if settled:
@@ -529,9 +595,20 @@ class Dispatcher:
                 return stop
 
     def _review(self, tid, worktree, slug, spec: str, base_ref: str) -> dict:
+        self._say(tid, ":mag: Independent review started.")
+        t0 = time.monotonic()
         review = adversarial_review(
             self.cfg, worktree, spec, self._session_log(slug, "review.jsonl"), base_ref)
         self.ledger.add_cost(tid, review.get("cost_usd", 0.0))  # review spend counts too
+        mins = (time.monotonic() - t0) / 60
+        if review.get("error"):
+            pass                                  # the block message that follows explains it
+        elif review.get("verdict") == "block":
+            n = len(review.get("findings") or [])
+            self._say(tid, f":no_entry_sign: Review found {n} blocking issue{'s' if n != 1 else ''} "
+                           f"({mins:.0f} min).")
+        else:
+            self._say(tid, f":white_check_mark: Review passed ({mins:.0f} min).")
         return review
 
     def _resume_workspace(self, tid: int, slug: str, base_ref: str) -> Path | None:
@@ -669,6 +746,8 @@ class Dispatcher:
             n = row["review_retries"] + 1
             self.ledger.update(tid, review_retries=n)
             self.comment(tid, "gate: review blocking, retry")
+            self._say(tid, f":repeat: Sending the review findings back to the worker "
+                           f"(retry {n}/{cfg.max_review_retries}).")
             stop = self._resume_step(
                 tid, worktree, slug, run, retry_prompt_review(review.get("findings", [])))
             if not stop:
