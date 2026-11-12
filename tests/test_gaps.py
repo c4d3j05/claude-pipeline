@@ -1120,14 +1120,15 @@ def test_no_continuation_when_the_worker_produced_nothing_or_budget_is_gone(tmp_
     assert d._worth_continuing(1, repo, "main") is False            # operator cancelled
 
 
-def test_only_cap_blocks_are_marked_resumable(tmp_path):
+def test_only_cap_and_permission_denial_blocks_are_marked_resumable(tmp_path):
     d = _dispatcher(tmp_path)
     d.ledger.upsert_claim(1, "s", "s")
     d.move = lambda *a: None; d.comment = lambda *a: None
     for reason in ("gate: tests red", "gate: review blocking", "worker error (rc=1): x"):
         d._block(1, reason)
         assert d.ledger.get(1)["resumable"] == 0, reason
-    for reason in ("cap: turns=60", "cap: wall-clock 45m", "cap: task cost $10.01 >= $10.00"):
+    for reason in ("cap: turns=60", "cap: wall-clock 45m", "cap: task cost $10.01 >= $10.00",
+                   "permission denials (x5): {'tool_name': 'Bash'}"):
         d.ledger.update(1, resumable=0)
         d._block(1, reason)
         assert d.ledger.get(1)["resumable"] == 1, reason
