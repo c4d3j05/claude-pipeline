@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as cfgmod
-from . import infra, slackthread
+from . import infra, slackthread, touches
 from . import pr as prmod
 from .cleanup import process_closed_prs, sync_deleted_tasks, watch_open_prs
 from .config import Config
@@ -101,6 +101,7 @@ class Dispatcher:
         self._stop = threading.Event()
         self._last_cleanup = 0.0
         self._waiting_logged: dict[int, list[int]] = {}   # task -> blockers last logged
+        self._clash_logged: dict[int, list[int]] = {}     # task -> tasks it shares files with
         self._label_id = 0
         self._gate_sem = threading.BoundedSemaphore(cfg.max_gates)
         self._baseline_lock = threading.Lock()
@@ -261,6 +262,7 @@ class Dispatcher:
         if not ready:
             return []
         out: list[dict] = []
+        holding = self._files_held()
         for t in self.vk.tasks_in_bucket(ready):
             if len(out) >= limit:
                 break
@@ -286,8 +288,44 @@ class Dispatcher:
                     continue
             elif self.vk.has_comment_prefix(t["id"], "dispatched:"):
                 continue  # claimed by a run whose ledger row is gone; don't double-claim
+            planned = self._planned(t, bool(holding))
+            clash = self._clash(t["id"], planned, holding)
+            if clash:
+                continue
+            if planned:
+                holding.append((t["id"], planned))
             out.append(t)
         return out
+
+    def _files_held(self) -> list[tuple[int, list[str]]]:
+        """(task, files) for work in progress or in review: what the diff changed once there is a
+        PR, otherwise what the task planned."""
+        held = []
+        for row in self.ledger.occupied():
+            files = touches.load(row["changed"]) or touches.load(row["touches"])
+            if files:
+                held.append((row["task_id"], files))
+        return held
+
+    def _planned(self, task: dict, needed: bool) -> list[str]:
+        """The `Touches:` of a Ready task. The description is fetched only when something holds files."""
+        desc = task.get("description")
+        if desc is None and needed:
+            desc = self.vk.task(task["id"]).get("description")
+        return touches.parse(desc)
+
+    def _clash(self, tid: int, planned: list[str], holding: list[tuple[int, list[str]]]) -> list[int]:
+        """Tasks whose files overlap this one's plan; logs once per change. Never raises."""
+        blockers = sorted({other for other, files in holding
+                           if planned and touches.clashes(planned, files, self.cfg.hot_paths)})
+        if blockers:
+            if self._clash_logged.get(tid) != blockers:
+                self._clash_logged[tid] = blockers
+                log.info("task %s shares files with task(s) %s (in progress or review); not claiming yet",
+                         tid, blockers)
+        else:
+            self._clash_logged.pop(tid, None)
+        return blockers
 
     def claim_and_dispatch(self, task: dict) -> None:
         tid = task["id"]
@@ -310,6 +348,7 @@ class Dispatcher:
             desc = task.get("description")
             if desc is None:
                 desc = self.vk.task(tid).get("description") or ""
+            self.ledger.update(tid, touches=touches.dump(touches.parse(desc)))
             found = slackthread.parse_source(desc)
             self.ledger.update(tid, slack_channel=found.channel if found else None,
                                slack_thread=found.ts if found else None)
@@ -774,7 +813,8 @@ class Dispatcher:
         )
         self.move(tid, "review")
         self.comment(tid, f"pr: {pr_url}")
-        self.ledger.update(tid, state="pr_open", pr_url=pr_url)
+        self.ledger.update(tid, state="pr_open", pr_url=pr_url,
+                           changed=touches.dump(prmod.changed_files(worktree, base_ref)))
         self.slack.pr_opened(tid, pr_url)
         log.info("task %s -> PR %s", tid, pr_url)
 

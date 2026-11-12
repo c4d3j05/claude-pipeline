@@ -22,6 +22,12 @@ def _git(worktree: Path, *args: str, timeout: int = 300) -> subprocess.Completed
     )
 
 
+def changed_files(worktree: Path, base_ref: str) -> list[str]:
+    """The files the branch changed against its base, as repository-relative paths."""
+    r = _git(worktree, "diff", "--name-only", f"{base_ref}...HEAD")
+    return [ln for ln in r.stdout.splitlines() if ln.strip()] if r.returncode == 0 else []
+
+
 def _cap_words(text: str, n: int = 300) -> str:
     words = (text or "").split()
     return " ".join(words[:n]) + (" …" if len(words) > n else "")
