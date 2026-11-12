@@ -51,11 +51,12 @@ class Slack:
 
     def __init__(self, webhook_url: str, bot_token: str = "",
                  thread_for: Callable[[int], tuple[str, str] | None] | None = None,
-                 http_post=requests.post):
+                 http_post=requests.post, progress: str = "all"):
         self.url = webhook_url
         self.bot_token = bot_token
         self._thread_for = thread_for
         self._http_post = http_post
+        self.progress_mode = progress     # all | thread | off
 
     def post_for_task(self, task_id: int, text: str) -> None:
         if self.bot_token and self._thread_for:
@@ -70,6 +71,21 @@ class Slack:
             if found:
                 log.warning("task %s: thread post failed, using the webhook", task_id)
         self.post(text)
+
+    def has_thread(self, task_id: int) -> bool:
+        try:
+            return bool(self.bot_token and self._thread_for and self._thread_for(task_id))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def progress(self, task_id: int, text: str) -> None:
+        """A stage-by-stage update. Goes where the task's other events go (its planner thread,
+        else the webhook), unless progress messages are limited or turned off."""
+        if self.progress_mode == "off":
+            return
+        if self.progress_mode == "thread" and not self.has_thread(task_id):
+            return
+        self.post_for_task(task_id, text)
 
     def post(self, text: str) -> None:
         if not self.url:
