@@ -104,7 +104,7 @@ class Config:
     #   thread = only tasks that have a planner thread
     #   off    = none (PR opened / blocked / merged are always sent)
     notify_progress: str = "all"
-    progress_interval_min: int = 10   # "still working" heartbeat during long stages; 0 = none
+    progress_interval_min: int = 30   # "still working" heartbeat during long stages; 0 = none
     # File globs where any two tasks collide even if their files differ (migration numbers, the
     # router). A task is not claimed while a task in progress or review overlaps its `Touches:`.
     hot_paths: tuple[str, ...] = ("*/migrations/*", "*/router/*", "*/config/settings/*")
@@ -172,7 +172,7 @@ def load(env_file: str | None = ".env") -> Config:
         baseline_check=_str(src, "BASELINE_CHECK", "true").lower() not in ("0", "false", "no", "off"),
         notify_progress=(_str(src, "NOTIFY_PROGRESS", "all").lower()
                          if _str(src, "NOTIFY_PROGRESS", "all").lower() in ("all", "thread", "off") else "all"),
-        progress_interval_min=max(0, _int(src, "PROGRESS_INTERVAL_MIN", 10)),
+        progress_interval_min=max(0, _int(src, "PROGRESS_INTERVAL_MIN", 30)),
         hot_paths=tuple(p.strip() for p in _str(src, "HOT_PATHS", "*/migrations/*,*/router/*,*/config/settings/*").split(",")
                         if p.strip()),
         db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),

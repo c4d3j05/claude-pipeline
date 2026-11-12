@@ -105,6 +105,7 @@ class Dispatcher:
         self._stop = threading.Event()
         self._last_cleanup = 0.0
         self._waiting_logged: dict[int, list[int]] = {}   # task -> blockers last logged
+        self._last_said: dict[int, float] = {}            # task -> when it last posted (monotonic)
         self._clash_logged: dict[int, list[int]] = {}     # task -> tasks it shares files with
         self._label_id = 0
         self._gate_sem = threading.BoundedSemaphore(cfg.max_gates)
@@ -137,8 +138,11 @@ class Dispatcher:
         except Exception as e:  # noqa: BLE001
             log.warning("comment on task %s failed: %s", task_id, e)
 
-    def _say(self, task_id: int, text: str) -> None:
-        """A progress update for the human. Never raises: Slack must not affect a task."""
+    def _say(self, task_id: int, text: str, *, beat: bool = False) -> None:
+        """A progress update for the human. Never raises: Slack must not affect a task.
+        A heartbeat (`beat`) does not count as the task having spoken."""
+        if not beat:
+            self._last_said[task_id] = time.monotonic()
         try:
             self.slack.progress(task_id, text)
         except Exception as e:  # noqa: BLE001
@@ -390,9 +394,11 @@ class Dispatcher:
             row = self.ledger.get(tid)
             if row is None or row["state"] not in _STAGE:
                 return
+            if time.monotonic() - self._last_said.get(tid, 0.0) < interval:
+                continue            # the task said something recently: that already shows it is alive
             self._say(tid, f":hourglass_flowing_sand: Still working on task {tid}: "
                            f"{_STAGE[row['state']]} · {(time.monotonic() - began) / 60:.0f} min "
-                           f"since pickup · ${row['cost_usd']:.2f} spent.")
+                           f"since pickup · ${row['cost_usd']:.2f} spent.", beat=True)
 
     def _session_log(self, slug: str, name: str) -> Path:
         return self.logs_root / slug / name
