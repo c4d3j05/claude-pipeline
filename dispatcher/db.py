@@ -152,6 +152,14 @@ class Ledger:
             )
             return cur.fetchall()
 
+    def occupied(self) -> list[sqlite3.Row]:
+        """Tasks holding files: in progress, or with a PR open and not yet merged."""
+        states = (*ACTIVE_STATES, "pr_open")
+        with self._lock:
+            return self.conn.execute(
+                f"SELECT * FROM tasks WHERE state IN ({','.join('?' * len(states))})", states
+            ).fetchall()
+
     def active_count(self) -> int:
         return len(self.active())
 
