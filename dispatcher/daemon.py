@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as cfgmod
-from . import infra, slackthread
+from . import infra, slackthread, touches
 from . import pr as prmod
 from .cleanup import process_closed_prs, sync_deleted_tasks, watch_open_prs
 from .config import Config
@@ -310,6 +310,7 @@ class Dispatcher:
             desc = task.get("description")
             if desc is None:
                 desc = self.vk.task(tid).get("description") or ""
+            self.ledger.update(tid, touches=touches.dump(touches.parse(desc)))
             found = slackthread.parse_source(desc)
             self.ledger.update(tid, slack_channel=found.channel if found else None,
                                slack_thread=found.ts if found else None)
@@ -774,7 +775,8 @@ class Dispatcher:
         )
         self.move(tid, "review")
         self.comment(tid, f"pr: {pr_url}")
-        self.ledger.update(tid, state="pr_open", pr_url=pr_url)
+        self.ledger.update(tid, state="pr_open", pr_url=pr_url,
+                           changed=touches.dump(prmod.changed_files(worktree, base_ref)))
         self.slack.pr_opened(tid, pr_url)
         log.info("task %s -> PR %s", tid, pr_url)
 

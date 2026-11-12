@@ -98,6 +98,10 @@ class Ledger:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN slack_channel TEXT")
         if "slack_thread" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN slack_thread TEXT")
+        if "touches" not in cols:            # planned files (from the task) and changed files (from the diff)
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN touches TEXT")
+        if "changed" not in cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN changed TEXT")
 
     # --- tasks -----------------------------------------------------------
     def upsert_claim(self, task_id: int, slug: str, branch: str) -> None:
@@ -111,7 +115,8 @@ class Ledger:
                        started_at=excluded.started_at,
                        -- a re-queued task is a fresh attempt: fresh budget and retries
                        test_retries=0, review_retries=0, cost_usd=0,
-                       cancel_requested=0, pruned=0, pid=NULL, pr_url=NULL, pr_status=NULL""",
+                       cancel_requested=0, pruned=0, pid=NULL, pr_url=NULL, pr_status=NULL,
+                       touches=NULL, changed=NULL""",
                 (task_id, slug, branch, _now(), _now()),
             )
             self.conn.commit()
