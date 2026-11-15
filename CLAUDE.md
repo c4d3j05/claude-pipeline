@@ -6,7 +6,7 @@ and `claude_worker_pipeline.pdf`. This is the *pipeline itself*, not a target re
 ## Layout
 - `dispatcher/` — the daemon. `daemon.py` is the main loop + per-task pipeline; the
   other modules are single-responsibility (see the table in `README.md`).
-- `db.py` — SQLite ledger (restart recovery + cost). Vikunja is the queue's source of truth.
+- `dispatcher/db.py` — SQLite ledger (restart recovery + cost). Vikunja is the queue's source of truth.
 - `templates/` — files copied into *target* repos (`worker-settings.json`, `CLAUDE.md`).
 - `launchd/`, `scripts/` — ops.
 - `tests/` — unit tests for the pure logic (no network/subprocess).

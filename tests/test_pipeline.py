@@ -161,6 +161,19 @@ def test_config_file_wins_and_set_values():
         assert cfgmod.load(str(envf)).project_id == 49
 
 
+def test_hot_reload_takes_only_hot_keys():
+    with tempfile.TemporaryDirectory() as d:
+        envf = Path(d) / ".env"
+        envf.write_text("MAX_WORKERS=2\nVIKUNJA_PROJECT_ID=49\nTARGET_REPO_PATH=/a\n")
+        cfg = cfgmod.load(str(envf))
+        cfgmod.set_values(
+            str(envf), {"MAX_WORKERS": "6", "VIKUNJA_PROJECT_ID": "50", "TARGET_REPO_PATH": "/b"}
+        )
+        new = cfgmod.hot_reload(cfg, str(envf))
+        assert new.max_workers == 6
+        assert new.project_id == 49 and new.repo_path == Path("/a")
+
+
 # --- dashboard status gathering ----------------------------------------
 def test_gather_status_and_snapshot():
     with tempfile.TemporaryDirectory() as d:
