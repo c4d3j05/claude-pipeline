@@ -213,7 +213,7 @@ class Dispatcher:
         startup values; only the HOT_KEYS take effect without a restart.
         """
         try:
-            self.cfg = cfgmod.load(self.env_file)
+            self.cfg = cfgmod.hot_reload(self.cfg, self.env_file)
         except Exception:  # noqa: BLE001
             log.warning("config reload failed; keeping current config")
 

@@ -6,6 +6,7 @@ can edit .env and the daemon picks the change up on its next tick (hot-reload).
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -180,6 +181,19 @@ def load(env_file: str | None = ".env") -> Config:
         slack_bot_token=_str(src, "SLACK_BOT_TOKEN"),
         db_path=Path(_str(src, "PIPELINE_DB", "pipeline.db")).expanduser(),
         log_level=_str(src, "LOG_LEVEL", "INFO").upper(),
+    )
+
+
+def hot_reload(current: Config, env_file: str | None = ".env") -> Config:
+    """Re-read `env_file`, taking only the HOT_KEYS; structural fields keep `current`'s values.
+
+    The daemon's Vikunja client, ledger, and ntree are bound to the startup values, so
+    letting e.g. VIKUNJA_PROJECT_ID change mid-run would split the pipeline across two
+    projects. Those need a restart.
+    """
+    fresh = load(env_file)
+    return dataclasses.replace(
+        current, **{k.lower(): getattr(fresh, k.lower()) for k in Config.HOT_KEYS}
     )
 
 
