@@ -117,6 +117,15 @@ class Config:
 
     settings_file: str = ".claude/worker-settings.json"
 
+    # Releases (explorer's release-batches): tickets with a `Release:` line build on release/r-n.
+    # The pipeline merges a ticket PR into a release branch itself only when this is on; a PR into
+    # main is never merged by the pipeline, whatever this says.
+    release_auto_merge: bool = False
+    release_pr_label: str = "claude-release"
+    # Extra check on a release head after the test suite (e.g. a migrations consistency check),
+    # run inside the release workspace; empty = none.
+    release_check_cmd: str = ""
+
     # Knobs the dashboard may edit and the daemon hot-reloads each tick.
     HOT_KEYS = (
         "MAX_WORKERS", "POLL_INTERVAL", "DAILY_CAP_USD", "TASK_CAP_USD",
@@ -177,6 +186,9 @@ def load(env_file: str | None = ".env") -> Config:
         hot_paths=tuple(p.strip() for p in _str(src, "HOT_PATHS", "*/migrations/*,*/router/*,*/config/settings/*").split(",")
                         if p.strip()),
         db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),
+        release_auto_merge=_str(src, "RELEASE_AUTO_MERGE", "false").lower() in ("1", "true", "yes", "on"),
+        release_pr_label=_str(src, "RELEASE_PR_LABEL", "claude-release"),
+        release_check_cmd=_str(src, "RELEASE_CHECK_CMD"),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),
         slack_bot_token=_str(src, "SLACK_BOT_TOKEN"),
         db_path=Path(_str(src, "PIPELINE_DB", "pipeline.db")).expanduser(),

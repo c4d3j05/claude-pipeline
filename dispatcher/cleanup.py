@@ -167,7 +167,9 @@ def process_closed_prs(cfg: Config, ledger: Ledger, ntree: Ntree, vikunja, bucke
             vikunja.move_task(cfg.project_id, target["project_view_id"], target["id"], task_id)
             mc = pr.get("mergeCommit")
             sha = (mc.get("oid", "")[:9] if isinstance(mc, dict) else "")
-            note = f"merged: {sha}".strip() if merged else "closed without merge"
+            into = pr.get("baseRefName") or ""
+            note = (f"merged: {sha}".strip() + (f" into {into}" if sha and into and into != cfg.base_branch else "")
+                    if merged else "closed without merge")
             vikunja.comment(task_id, f"<p>{note} ({pr.get('url')})</p>")
         except Exception as e:  # noqa: BLE001
             log.warning("vikunja update on close failed for task %s: %s", task_id, e)
