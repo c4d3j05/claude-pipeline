@@ -19,3 +19,6 @@ pipeline.lock
 
 # repowise index and caches (local; rebuilt by `repowise init` / `repowise update`)
 .repowise/
+
+# repowise-managed agent context; regenerated locally after every commit
+.claude/CLAUDE.md
