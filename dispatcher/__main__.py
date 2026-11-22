@@ -89,12 +89,16 @@ def cmd_selftest(args) -> int:
                 ok = False
         label_id = vk.ensure_label(cfg.claude_label)
         log.info("label '%s' id=%s", cfg.claude_label, label_id)
+        from .releases import target_of
         from .vikunja import stuck_dependents
 
-        for tid, blocker in stuck_dependents(vk.board(cfg.project_id, view), cfg.bucket_ready,
-                                             cfg.bucket_blocked, cfg.claude_label):
-            log.warning("task %s is in %s but waits for task %s, which is in %s: it will not "
-                        "start until that one is dealt with", tid, cfg.bucket_ready, blocker,
+        board = vk.board(cfg.project_id, view)
+        tasks = {t["id"]: t for b in board for t in b.get("tasks") or []}
+        for tid, blocker in stuck_dependents(board, cfg.bucket_ready, cfg.bucket_blocked, cfg.claude_label):
+            target = target_of(tasks.get(tid, {}).get("description"))
+            log.warning("task %s%s is in %s but waits for task %s, which is in %s: it will not "
+                        "start until that one is dealt with", tid,
+                        f" (release {target.release})" if target else "", cfg.bucket_ready, blocker,
                         cfg.bucket_blocked)
     except Exception as e:  # noqa: BLE001
         log.error("Vikunja check failed: %s", e)

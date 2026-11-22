@@ -158,6 +158,14 @@ All via `.env` (see [`.env.example`](.env.example)). Key knobs: `MAX_WORKERS` (4
 `MAX_REVIEW_RETRIES` (1), `DAILY_CAP_USD` (50), `WORKER_MODEL` / `REVIEW_MODEL`
 (the review runs the cheaper model).
 
+## Releases
+
+A ticket whose description has `Release: R-n · branch release/r-n` builds on that release branch,
+not on main. claude-planner files these for a batch of explorer findings: a "Release R-n" tracking
+task (label `release-tracker`, never claimed) with every ticket as its subtask. The full contract is
+explorer's OpenSpec change `release-batches` (design.md, "Wire contract"); [`RELEASES.md`](RELEASES.md)
+describes what this repo does with it and which settings turn it on.
+
 ## Status write-back
 
 | Event | Bucket | Comment |
@@ -167,7 +175,8 @@ All via `.env` (see [`.env.example`](.env.example)). Key knobs: `MAX_WORKERS` (4
 | Review blocked | In Progress | `gate: review blocking, retry` |
 | PR opened | Review | `pr: <url>` |
 | Worker wrote BLOCKED / cap hit | Blocked | `blocked: <reason>` / `cap: …` |
-| PR merged / closed | Done / Blocked | `merged: <sha>` / `closed without merge` |
+| PR merged / closed | Done / Blocked | `merged: <sha>` (`merged: <sha> into release/r-n` for a release ticket) / `closed without merge` |
+| Release branch conflicts with main | Ready | `waiting: release R-n: …; repair task #N` |
 
 ## Layout
 
@@ -181,7 +190,8 @@ dispatcher/        the daemon (poll, claim, prompt, worker, gate, review, PR, cl
   worker.py        launch `claude -p`, stream-json capture, wall-clock kill
   stream.py        parse stream-json (session id, cost, turns, denials, summary)
   review.py        the gate: independent tests + adversarial review session
-  pr.py            git push + `gh pr create` + PR body assembly
+  pr.py            git push + `gh pr create` + PR body assembly + release merges and PRs
+  releases.py      release branches: Release lines, sync with main, repairs, the auto-merge guard
   cleanup.py       PR-close teardown + nightly maintenance
   daemon.py        the main loop and per-task pipeline
 templates/         worker-settings.json + CLAUDE.md template dropped into target repos

@@ -11,6 +11,8 @@ without the MCP server). Verified against Vikunja's API:
   PUT  /tasks/{id}/comments        {comment}             -> add a comment
   GET  /labels ; PUT /labels {title}                     -> list / create labels
   PUT  /tasks/{id}/labels          {label_id}            -> apply a label
+  PUT  /projects/{id}/tasks        {title, description}  -> create a task (release repair tickets)
+  PUT  /tasks/{id}/relations       {other_task_id, relation_kind} -> relate two tasks
 """
 
 from __future__ import annotations
@@ -119,6 +121,18 @@ class Vikunja:
 
     def delete_comment(self, task_id: int, comment_id: int) -> None:
         self._req("DELETE", f"/tasks/{task_id}/comments/{comment_id}")
+
+    def create_task(self, project_id: int, title: str, description: str) -> dict:
+        return self._req("PUT", f"/projects/{project_id}/tasks",
+                         json={"title": title, "description": description})
+
+    def relate(self, task_id: int, other_task_id: int, kind: str) -> None:
+        try:
+            self._req("PUT", f"/tasks/{task_id}/relations",
+                      json={"other_task_id": other_task_id, "relation_kind": kind})
+        except VikunjaError as e:
+            if e.status != 409:            # already related is fine
+                raise
 
     # --- labels ----------------------------------------------------------
     def labels(self) -> list[dict]:

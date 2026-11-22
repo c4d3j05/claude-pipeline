@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import os
 import re
+import shlex
 import signal
 import subprocess
 import threading
@@ -14,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as cfgmod
-from . import infra, slackthread, touches
+from . import infra, releases, slackthread, touches
 from . import pr as prmod
 from .cleanup import process_closed_prs, sync_deleted_tasks, watch_open_prs
 from .config import Config
@@ -57,7 +58,7 @@ class _Run:
     session_id: str
 
 
-Stop = tuple[str, str]  # ("cancel" | "block", reason)
+Stop = tuple[str, str]  # ("cancel" | "block" | "wait", reason); wait = back to Ready for a release repair
 
 # Seconds to wait before retrying a session that failed for a transient reason.
 TRANSIENT_BACKOFF_S = (30.0, 120.0)
@@ -111,6 +112,14 @@ class Dispatcher:
         self._gate_sem = threading.BoundedSemaphore(cfg.max_gates)
         self._baseline_lock = threading.Lock()
         self._tick_failures = 0
+        # Releases: git on release branches happens in a scratch worktree, one release at a time.
+        self.rgit = releases.ReleaseGit(cfg.repo_path, cfg.db_path.resolve().parent / "release-scratch",
+                                        base=cfg.base_branch)
+        self._release_locks: dict[str, threading.Lock] = {}
+        self._release_locks_guard = threading.Lock()
+        self._release_pass_running = threading.Event()
+        self._repair_logged: dict[int, str] = {}           # task -> release it waits for
+        self._mismatch_said: dict[str, str] = {}           # release -> mismatch already alerted
 
     # --- bucket / label resolution --------------------------------------
     def refresh_board(self) -> None:
@@ -236,6 +245,9 @@ class Dispatcher:
             self.refresh_board()
             process_closed_prs(self.cfg, self.ledger, self.ntree, self.vk, self.buckets, self.slack)
             watch_open_prs(self.cfg, self.ledger, self.vk, self.slack)
+            if not self._release_pass_running.is_set():
+                self._release_pass_running.set()
+                self.pool.submit(self._safe_release_pass)
 
         # Operator pause (from the dashboard): keep running workers, stop claiming.
         if self.ledger.is_paused():
@@ -271,11 +283,12 @@ class Dispatcher:
             return []
         out: list[dict] = []
         holding = self._files_held()
+        repairs = releases.open_repairs(board)
         for t in self.vk.tasks_in_bucket(ready):
             if len(out) >= limit:
                 break
-            if t.get("done"):
-                continue
+            if t.get("done") or releases.is_tracker(t):
+                continue           # a release's tracking task is bookkeeping, never work
             if self.cfg.claude_label.lower() not in self.vk.task_labels(t):
                 continue
             waiting = open_blockers(t)
@@ -296,23 +309,44 @@ class Dispatcher:
                     continue
             elif self.vk.has_comment_prefix(t["id"], "dispatched:"):
                 continue  # claimed by a run whose ledger row is gone; don't double-claim
+            target = self._target(t, bool(repairs or holding))
+            if target and repairs.get(target.release) not in (None, t["id"]):
+                if self._repair_logged.get(t["id"]) != target.release:
+                    self._repair_logged[t["id"]] = target.release
+                    log.info("task %s waits for the repair of release %s (task %s)", t["id"], target.release,
+                             repairs[target.release])
+                continue
+            self._repair_logged.pop(t["id"], None)
             planned = self._planned(t, bool(holding))
-            clash = self._clash(t["id"], planned, holding)
+            # Work for main never waits on a release ticket: the overlap is settled when main is
+            # next merged into the release branch.
+            relevant = [(o, f) for o, f, tgt in holding if target is not None or not releases.is_release_branch(tgt)]
+            clash = self._clash(t["id"], planned, relevant)
             if clash:
                 continue
             if planned:
-                holding.append((t["id"], planned))
+                holding.append((t["id"], planned, target.branch if target else None))
             out.append(t)
         return out
 
-    def _files_held(self) -> list[tuple[int, list[str]]]:
-        """(task, files) for work in progress or in review: what the diff changed once there is a
-        PR, otherwise what the task planned."""
+    def _target(self, task: dict, needed: bool) -> releases.Target | None:
+        """The ticket's release (its `Release:` line); the description is fetched only if needed."""
+        desc = task.get("description")
+        if desc is None and needed:
+            try:
+                desc = self.vk.task(task["id"]).get("description")
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not read task %s: %s", task["id"], e)
+        return releases.target_of(desc)
+
+    def _files_held(self) -> list[tuple[int, list[str], str | None]]:
+        """(task, files, target branch) for work in progress or in review: what the diff changed
+        once there is a PR, otherwise what the task planned."""
         held = []
         for row in self.ledger.occupied():
             files = touches.load(row["changed"]) or touches.load(row["touches"])
             if files:
-                held.append((row["task_id"], files))
+                held.append((row["task_id"], files, row["target"]))
         return held
 
     def _planned(self, task: dict, needed: bool) -> list[str]:
@@ -357,6 +391,8 @@ class Dispatcher:
             if desc is None:
                 desc = self.vk.task(tid).get("description") or ""
             self.ledger.update(tid, touches=touches.dump(touches.parse(desc)))
+            target = releases.target_of(desc)
+            self.ledger.update(tid, target=target.branch if target else None)
             found = slackthread.parse_source(desc)
             self.ledger.update(tid, slack_channel=found.channel if found else None,
                                slack_thread=found.ts if found else None)
@@ -515,6 +551,9 @@ class Dispatcher:
         kind, reason = stop
         if kind == "cancel":
             return self._cancelled(tid, slug)
+        if kind == "wait":
+            _safe_call(lambda: self.ntree.rm(slug))
+            return self._wait_for_repair(tid, reason)
         return self._block(tid, reason)
 
     def _resume_step(self, tid, worktree, slug, run: _Run, prompt: str) -> Stop | None:
@@ -707,6 +746,12 @@ class Dispatcher:
         cfg = self.cfg
 
         base_ref = self.ntree.base_ref()   # fetched, so workers never fork from a stale main
+        target = releases.target_of(desc)
+        repair = target is not None and releases.repair_release(task) == target.release
+        if target:
+            base_ref, stop = self._release_base(tid, target, repair)
+            if stop:
+                return self._halt(tid, slug, stop)
         resume_wt = self._resume_workspace(tid, slug, base_ref)
         row0 = self.ledger.get(tid)
         # resumable == 2: blocked by the environment after the worker had finished, so only
@@ -733,8 +778,13 @@ class Dispatcher:
         # A cancel requested during setup (minutes of installs) must not cost a worker run.
         if self.ledger.cancel_requested(tid):
             return self._cancelled(tid, slug)
-        if not resume_wt:  # a resumed workspace is not pristine; the base was checked before
+        if not resume_wt and not repair:  # a resumed workspace is not pristine; a repair's base is red
             stop = self._baseline(tid, worktree, slug, base_ref)
+            if stop and target and stop[1].startswith("baseline red"):
+                # The release head is red: that is the release's problem, not this ticket's.
+                rid = self._file_repair(target, tail=stop[1])
+                if rid:
+                    stop = ("wait", f"release {target.release}: tests fail on {target.branch}; repair task #{rid}")
             if stop:
                 return self._halt(tid, slug, stop)
         if self.ledger.cancel_requested(tid):
@@ -832,7 +882,7 @@ class Dispatcher:
         )
         pr_url = prmod.push_and_create(
             cfg=cfg, worktree=worktree, branch=slug,
-            title=title, body=body, needs_qa=needs_qa,
+            title=title, body=body, needs_qa=needs_qa, base=target.branch if target else None,
         )
         self.move(tid, "review")
         self.comment(tid, f"pr: {pr_url}")
@@ -840,6 +890,209 @@ class Dispatcher:
                            changed=touches.dump(prmod.changed_files(worktree, base_ref)))
         self.slack.pr_opened(tid, pr_url)
         log.info("task %s -> PR %s", tid, pr_url)
+        if target:
+            self._auto_merge(tid, worktree, slug, target, pr_url, run, title, body, needs_qa, repair)
+
+    # --- releases --------------------------------------------------------
+    def _release_lock(self, release: str) -> threading.Lock:
+        with self._release_locks_guard:
+            return self._release_locks.setdefault(release, threading.Lock())
+
+    def _release_base(self, tid: int, target: releases.Target, repair: bool) -> tuple[str, Stop | None]:
+        """The ref a release ticket forks from: its release branch, created from main if needed and
+        with main merged in (a repair builds on the branch as it is). A conflict files a repair."""
+        with self._release_lock(target.release):
+            if repair:
+                ok = self.rgit.ensure(target.branch)
+                fail = ("block", f"release {target.release}: cannot read {target.branch}")
+                return f"origin/{target.branch}", (None if ok else fail)
+            sync = self.rgit.sync(target.branch)
+        if sync.ok:
+            if sync.merged:
+                self._say(tid, f":twisted_rightwards_arrows: Merged main into `{target.branch}` first.")
+            return f"origin/{target.branch}", None
+        if sync.conflict:
+            rid = self._file_repair(target, conflict=sync.conflict)
+            why = (f"release {target.release}: main conflicts with {target.branch} in "
+                   f"{', '.join(sync.conflict[:5])}")
+            return "", (("wait", f"{why}; repair task #{rid}") if rid else ("block", why))
+        return "", ("block", f"release {target.release}: {sync.error}")
+
+    def _wait_for_repair(self, tid: int, reason: str) -> None:
+        """Put a release ticket back in Ready: it starts again once the release's repair is done."""
+        log.info("task %s waits: %s", tid, reason)
+        self.ledger.update(tid, state="blocked")
+        try:
+            self.move(tid, "ready")
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not move task %s back to ready: %s", tid, e)
+        self.comment(tid, f"waiting: {reason}. Picked up again once the repair is done.")
+        self._say(tid, f":construction: Waiting: {reason}. It starts again once the repair is done.")
+
+    def _file_repair(self, target: releases.Target, *, conflict: list[str] | None = None, tail: str = "") -> int | None:
+        """A "Repair release R-n" ticket inside the release, unless one is already open. Never raises."""
+        try:
+            board = self.vk.board(self.cfg.project_id, self.view_id)
+            existing = releases.open_repairs(board).get(target.release)
+            if existing:
+                return existing
+            created = self.vk.create_task(self.cfg.project_id, f"Repair release {target.release}",
+                                          releases.repair_description(target, conflict=conflict, tail=tail))
+            rid = created["id"]
+            self.vk.apply_label(rid, self._label_id or self.vk.ensure_label(self.cfg.claude_label))
+            self.vk.apply_label(rid, self.vk.ensure_label(f"release:{target.release}"))
+            tracker = releases.trackers(board).get(target.release)
+            if tracker:
+                self.vk.relate(tracker["id"], rid, "subtask")
+            self.move(rid, "ready")
+            why = (f"main conflicts with {target.branch} in {', '.join((conflict or [])[:5])}" if conflict
+                   else f"tests fail on the head of {target.branch}")
+            self.slack.alert(f"release {target.release}: {why}. Filed repair task #{rid}; the release's other "
+                             f"tickets wait for it ({self.task_link(rid)})")
+            log.warning("release %s: %s; repair task %s filed", target.release, why, rid)
+            return rid
+        except Exception:
+            log.exception("could not file a repair ticket for release %s", target.release)
+            return None
+
+    def _auto_merge(self, tid, worktree, slug, target, pr_url, run, title, body, needs_qa, repair) -> None:
+        """Merge a release ticket's PR into its release branch, when RELEASE_AUTO_MERGE is on. If the
+        release moved since the ticket branched, take the new head and pass the tests again first.
+        A conflict, a red gate or a refused merge leaves the PR open for a human. Never into main."""
+        if not releases.auto_merge_allowed(self.cfg.release_auto_merge, target.branch):
+            return
+        with self._release_lock(target.release):
+            up = self.rgit.update_ticket(worktree, target.branch)
+            if not up.ok:
+                msg = (f"not merged: {target.branch} moved and conflicts with this branch in "
+                       f"{', '.join(up.conflict[:5])}" if up.conflict else f"not merged: {up.error}")
+                self.comment(tid, f"{msg}; a human resolves and merges it ({pr_url})")
+                self.slack.pr_needs_attention(tid, msg, pr_url)
+                return
+            if up.merged:
+                self._say(tid, f":arrows_counterclockwise: `{target.branch}` moved; testing on its new head before merging.")
+                green, tail = self._tests(tid, slug)
+                if not green:
+                    self.comment(tid, f"not merged: tests fail once {target.branch}'s new head is merged in; "
+                                      f"a human resolves it ({pr_url})\n{tail[-400:]}")
+                    self.slack.pr_needs_attention(tid, "tests fail on the moved release head", pr_url)
+                    return
+                prmod.push_and_create(cfg=self.cfg, worktree=worktree, branch=slug, title=title, body=body,
+                                      needs_qa=needs_qa, base=target.branch)
+            ok, msg = prmod.merge_into_release(self.cfg, pr_url, target.branch, head_sha(worktree),
+                                               merge_commit=repair)
+        if ok:
+            self.comment(tid, f"merged into {target.branch} by the pipeline (tests and review passed)")
+            self._say(tid, f":twisted_rightwards_arrows: Merged into `{target.branch}`.")
+        else:
+            self.comment(tid, f"auto-merge into {target.branch} failed: {msg}; merge it by hand ({pr_url})")
+            self.slack.pr_needs_attention(tid, f"auto-merge failed: {msg}", pr_url)
+
+    def _safe_release_pass(self) -> None:
+        try:
+            self.release_pass()
+        except Exception:
+            log.exception("release pass failed")
+        finally:
+            self._release_pass_running.clear()
+
+    def release_pass(self) -> None:
+        """Every cleanup interval: close merged releases, and open the release PR of a release whose
+        tickets are all done and whose head is green (main merged in first)."""
+        board = self.vk.board(self.cfg.project_id, self.view_id)
+        trk = releases.trackers(board)
+        if not trk:
+            return
+        prs = prmod.release_prs(self.cfg)
+        for pr in prs:
+            rel = pr.get("headRefName", "")
+            if pr.get("state") != "MERGED" or not releases.is_release_branch(rel):
+                continue
+            t = trk.get(rel.removeprefix("release/").upper())
+            if t is None or t.get("done"):
+                continue
+            mc = pr.get("mergeCommit")
+            sha = (mc.get("oid", "")[:9] if isinstance(mc, dict) else "")
+            self.move(t["id"], "done")
+            self.comment(t["id"], f"merged: {sha} into {self.cfg.base_branch} ({pr.get('url')})")
+            deleted = self.rgit.delete(rel)
+            self.slack.alert(f"release {rel.removeprefix('release/').upper()} merged into {self.cfg.base_branch}"
+                             + ("" if deleted else f"; could not delete {rel}"))
+            log.info("release %s merged; tracker %s done", rel, t["id"])
+        open_heads = {p.get("headRefName") for p in prs if p.get("state") == "OPEN"}
+        repairs = releases.open_repairs(board)
+        for rel, t in trk.items():
+            if t.get("done"):
+                continue
+            branch = f"release/{rel.lower()}"
+            subs = (self.vk.task(t["id"]).get("related_tasks") or {}).get("subtask") or []
+            self._check_mismatch(rel, {s["id"] for s in subs}, board)
+            if not subs or any(not s.get("done") for s in subs) or branch in open_heads or rel in repairs:
+                continue
+            target = releases.Target(rel, branch)
+            with self._release_lock(rel):
+                sync = self.rgit.sync(branch)
+            if not sync.ok:
+                if sync.conflict:
+                    self._file_repair(target, conflict=sync.conflict)
+                else:
+                    log.warning("release %s: %s", rel, sync.error)
+                continue
+            green, tail = self._release_head_green(rel, branch)
+            if not green:
+                self._file_repair(target, tail=tail)
+                continue
+            url = prmod.create_release_pr(self.cfg, branch, f"Release {rel}",
+                                          _release_body(rel, t, subs, self.task_link))
+            self.comment(t["id"], f"pr: {url}")
+            self.slack.alert(f"Release {rel} is ready: every ticket is merged and its head is green. Merge it "
+                             f"with a MERGE COMMIT (not squash), so explorer can trace each fix on UAT: {url}")
+            log.info("release %s -> PR %s", rel, url)
+
+    def _release_head_green(self, rel: str, branch: str) -> tuple[bool, str]:
+        """The test gate (and RELEASE_CHECK_CMD) on the release head, once per head commit."""
+        sha = self.rgit.sha(f"origin/{branch}")
+        boot = infra.boot_id()
+        row = self.ledger.get_baseline(sha, boot) if sha else None
+        if row is not None:
+            return bool(row["green"]), row["tail"]
+        slug = f"release-{rel.lower()}"
+        try:
+            self.ntree.rm(slug)
+            self.ntree.remove_branch(slug)
+            self.ntree.new(slug, f"origin/{branch}")
+            green, tail = self._gate(slug)
+            if green and self.cfg.release_check_cmd:
+                cp = self.ntree.run(slug, shlex.split(self.cfg.release_check_cmd), timeout=self.cfg.gate_timeout_min * 60)
+                green = cp.returncode == 0
+                tail = "\n".join(((cp.stdout or "") + (cp.stderr or "")).splitlines()[-40:])
+        except (NtreeError, GateTimeout) as e:
+            return False, str(e)
+        finally:
+            _safe_call(lambda: self.ntree.rm(slug))
+            _safe_call(lambda: self.ntree.remove_branch(slug))
+        if sha:
+            self.ledger.set_baseline(sha, green, tail, boot)
+        return green, tail
+
+    def _check_mismatch(self, rel: str, sub_ids: set[int], board: list[dict]) -> None:
+        """A ticket with the release's line but no subtask relation, or the reverse, is half removed
+        from the release: say so once (it still counts as part of the release)."""
+        lined = {t["id"] for b in board for t in b.get("tasks") or []
+                 if not releases.is_tracker(t) and (releases.target_of(t.get("description")) or
+                                                    releases.Target("", "")).release == rel}
+        no_rel = sorted(lined - sub_ids)
+        no_line = sorted(i for i in sub_ids - lined
+                         if any(t["id"] == i for b in board for t in b.get("tasks") or []))
+        sig = f"{no_rel}|{no_line}"
+        if (no_rel or no_line) and self._mismatch_said.get(rel) != sig:
+            self._mismatch_said[rel] = sig
+            self.slack.alert(f"release {rel}: tickets half removed. " +
+                             (f"Release line but no subtask relation: {no_rel}. " if no_rel else "") +
+                             (f"Subtask without the Release line: {no_line}. " if no_line else "") +
+                             "Remove both (or neither) to take a ticket out of the release.")
+        elif not (no_rel or no_line):
+            self._mismatch_said.pop(rel, None)
 
     def _cancelled(self, task_id: int, slug: str) -> None:
         log.warning("task %s cancelled by operator", task_id)
@@ -936,3 +1189,12 @@ def _is_claude_proc(pid: int) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return "claude" in out
+
+
+def _release_body(rel: str, tracker: dict, subs: list[dict], link) -> str:
+    lines = [(f"Release {rel}: every ticket below is merged into `release/{rel.lower()}` and the head passed "
+              "the test gate."), "",
+             ("**Merge with a merge commit, not a squash**: explorer checks each ticket's merge commit is on UAT, "
+              "and a squash hides them."), "", f"Tracker: #{tracker['id']} ({link(tracker['id'])})", "", "Tickets:"]
+    lines += [f"- #{s['id']} {s.get('title', '')}" for s in subs]
+    return "\n".join(lines) + "\n"

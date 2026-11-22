@@ -102,6 +102,8 @@ class Ledger:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN touches TEXT")
         if "changed" not in cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN changed TEXT")
+        if "target" not in cols:             # the branch the task builds on: NULL = main, else release/r-n
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN target TEXT")
 
     # --- tasks -----------------------------------------------------------
     def upsert_claim(self, task_id: int, slug: str, branch: str) -> None:

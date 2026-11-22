@@ -121,8 +121,10 @@ def push_and_create(
     title: str,
     body: str,
     needs_qa: bool = False,
+    base: str | None = None,
 ) -> str:
-    """Push the branch and open a PR. Returns the PR URL."""
+    """Push the branch and open a PR against `base` (default BASE_BRANCH; a release branch for a
+    release ticket). Returns the PR URL."""
     # Pipeline branches (task-<id>-…) are rebuilt from scratch on every run, so a branch
     # left on the remote by an earlier attempt must be overwritten, or the push is
     # rejected as non-fast-forward and the task can never recover.
@@ -148,7 +150,7 @@ def push_and_create(
 
     args = [
         "gh", "pr", "create",
-        "--base", cfg.base_branch,
+        "--base", base or cfg.base_branch,
         "--head", branch,
         "--title", title,
         "--body-file", str(body_file),
@@ -168,7 +170,7 @@ def push_and_create(
 # Fields every token can read. CI status (`statusCheckRollup`) needs extra permission
 # (checks/statuses: read) that fine-grained tokens often lack; asking for it in the same
 # call makes the WHOLE call fail, which would also break closed-PR cleanup.
-_CORE_FIELDS = "number,state,headRefName,url,mergedAt,mergeCommit,mergeable,reviewDecision"
+_CORE_FIELDS = "number,state,headRefName,baseRefName,url,mergedAt,mergeCommit,mergeable,reviewDecision"
 _checks_unavailable = False
 
 
@@ -224,3 +226,50 @@ def open_worker_prs(cfg: Config) -> list[dict]:
         if r.get("number") in by_number:
             r["statusCheckRollup"] = by_number[r["number"]]
     return rows
+
+
+# --- releases --------------------------------------------------------------------------------
+def merge_into_release(cfg: Config, pr_url: str, base: str, head_sha: str, *, merge_commit: bool) -> tuple[bool, str]:
+    """Merge a ticket PR into its release branch. Refuses anything but a release-branch base, so
+    this can never merge into main. `--match-head-commit` makes GitHub merge exactly what was tested."""
+    from .releases import auto_merge_allowed
+    if not auto_merge_allowed(cfg.release_auto_merge, base):
+        return False, f"not merged: auto-merge is only for release branches (base {base!r})"
+    method = "--merge" if merge_commit else "--squash"
+    cp = subprocess.run(["gh", "pr", "merge", pr_url, method, "--match-head-commit", head_sha],
+                        cwd=cfg.repo_path, capture_output=True, text=True, timeout=300,
+                        env=clean_env("github"))
+    if cp.returncode != 0:
+        return False, (cp.stderr or cp.stdout).strip()[-300:]
+    return True, ""
+
+
+def release_prs(cfg: Config, state: str = "all") -> list[dict]:
+    """The release -> main PRs (label RELEASE_PR_LABEL). [] when unreadable."""
+    cp = subprocess.run(
+        ["gh", "pr", "list", "--label", cfg.release_pr_label, "--state", state, "--json",
+         "number,state,headRefName,baseRefName,url,mergeCommit,body", "--limit", "100"],
+        cwd=cfg.repo_path, capture_output=True, text=True, timeout=120, env=clean_env("github"))
+    if cp.returncode != 0:
+        return []
+    try:
+        return json.loads(cp.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+
+
+def create_release_pr(cfg: Config, branch: str, title: str, body: str) -> str:
+    """Open release/r-n -> BASE_BRANCH for a human to merge with a merge commit. Returns the URL."""
+    _ensure_label(cfg, cfg.release_pr_label, "0e8a16", "A release built by claude-pipeline")
+    body_file = cfg.repo_path / f".release-pr-{branch.replace('/', '-')}.md"
+    body_file.write_text(body)
+    try:
+        cp = subprocess.run(["gh", "pr", "create", "--base", cfg.base_branch, "--head", branch, "--title", title,
+                             "--body-file", str(body_file), "--label", cfg.release_pr_label],
+                            cwd=cfg.repo_path, capture_output=True, text=True, timeout=300,
+                            env=clean_env("github"))
+    finally:
+        body_file.unlink(missing_ok=True)
+    if cp.returncode != 0:
+        raise RuntimeError(f"gh pr create failed: {cp.stderr.strip() or cp.stdout.strip()}")
+    return cp.stdout.strip().splitlines()[-1]
