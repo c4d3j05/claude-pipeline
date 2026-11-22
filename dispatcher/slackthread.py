@@ -24,6 +24,8 @@ _SOURCE = re.compile(r"(?im)^\s*Source:\s*(\S+)")
 _LINK = re.compile(
     r"^https://[A-Za-z0-9-]+\.slack\.com/archives/(?P<channel>[CDG][A-Z0-9]+)/p(?P<digits>\d{7,})"
     r"(?:\?(?P<query>\S*))?$")
+# What the planner writes when Slack gave it no permalink (planner/filing.py).
+_FALLBACK = re.compile(r"^slack:(?P<channel>[CDG][A-Z0-9]+)/(?P<ts>\d+\.\d+)$")
 
 
 class Thread(NamedTuple):
@@ -36,12 +38,17 @@ def parse_source(description: str) -> Thread | None:
 
     A permalink looks like `https://<ws>.slack.com/archives/<CHANNEL>/p1699999999000100`; its
     timestamp is the digits with a dot before the last six. A `thread_ts` query parameter, when
-    present, names the thread instead.
+    present, names the thread instead. The planner's fallback `slack:<CHANNEL>/<thread_ts>`
+    names both directly.
     """
     m = _SOURCE.search(_strip_html(description or ""))
     if not m:
         return None
-    link = _LINK.match(m.group(1).rstrip(".,;)·"))
+    token = m.group(1).rstrip(".,;)·")
+    fallback = _FALLBACK.match(token)
+    if fallback:
+        return Thread(fallback.group("channel"), fallback.group("ts"))
+    link = _LINK.match(token)
     if not link:
         return None
     digits = link.group("digits")
