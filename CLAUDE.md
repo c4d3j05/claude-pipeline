@@ -28,6 +28,23 @@ uv run pytest tests/test_pipeline.py::test_slugify_and_task_slug
 This repo does not bind ports or a DB itself. When operating a target repo, the
 dispatcher relies on `ntree` to provide `NTREE_WORKSPACE` and `$PORT`.
 
+## Change workflow
+New work is an OpenSpec change, shaped with grill-with-docs and grounded in the repowise workspace index (MCP tools).
+- When calling repowise tools, pass repo alias `pipeline`.
+- Before drafting `proposal.md` or `design.md`, call repowise `get_overview`, `get_context` and `get_why`
+  for the affected modules, and cite what they return in the artifact.
+- During grill-with-docs, answer questions about the code with repowise tools before asking the owner,
+  including how `planner` and `explorer` use the same convention. Call `get_health` on every module
+  the change touches; when its health is poor, ask "refactor first or build on top?" as a question of its own.
+- `proposal.md` has an Impact section built from `get_risk` on the affected files that names every affected
+  repo (`planner`, `pipeline`, `explorer`).
+- This repo exchanges data with `planner` and `explorer` only through Vikunja (buckets, labels, relations,
+  task fields) and Slack (channels, message formats, threads). The contract is defined in
+  `../planner/openspec/specs/integration/` (owned by planner). Any change to bucket names, task fields,
+  relations or message formats is a cross-repo change and needs a linked change in each affected repo.
+- Before archiving a change, run `repowise risk main..HEAD` and `repowise impacted-tests main..HEAD` and
+  report both results.
+
 ## Do not touch
 - `spec.md`, `claude_worker_pipeline.pdf` — the source of truth for the design.
 - `.env` — secrets (Vikunja token, Slack webhook).

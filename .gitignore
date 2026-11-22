@@ -16,3 +16,6 @@ logs/
 
 # runtime single-instance lock (holds the dispatcher PID)
 pipeline.lock
+
+# repowise index and caches (local; rebuilt by `repowise init` / `repowise update`)
+.repowise/
