@@ -30,10 +30,21 @@ def test_source_in_html_description():
     assert parse_source(d) == Thread("D0CGS2L6KLK", "1699999999.000100")
 
 
+def test_planner_fallback_source_gives_channel_and_thread_ts():
+    d = "Source: slack:D0CGS2L6KLK/1699999999.000100 · investigation ab12 · ticket a"
+    assert parse_source(d) == Thread("D0CGS2L6KLK", "1699999999.000100")
+
+
+def test_planner_fallback_source_in_html_description():
+    d = "<p>Source: slack:C0123ABCD/1699999999.000100 · investigation ab12</p>"
+    assert parse_source(d) == Thread("C0123ABCD", "1699999999.000100")
+
+
 @pytest.mark.parametrize("desc", [
     "", None, "no source here", "Source: not a link", "Source: https://example.com/archives/D1/p1699999999000100",
     "Source: https://ignify.slack.com/messages/D1", "Source: https://ignify.slack.com/archives/x1/p1699999999000100",
-    "mentions Source: later in a sentence",
+    "mentions Source: later in a sentence", "Source: slack:x1/1699999999.000100",
+    "Source: slack:D0CGS2L6KLK/1699999999000100", "Source: slack:D0CGS2L6KLK",
 ])
 def test_no_valid_source_means_no_thread(desc):
     assert parse_source(desc) is None

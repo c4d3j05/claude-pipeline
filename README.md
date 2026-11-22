@@ -174,7 +174,7 @@ describes what this repo does with it and which settings turn it on.
 | Tests failed (retry n) | In Progress | `gate: tests red, retry n/2` |
 | Review blocked | In Progress | `gate: review blocking, retry` |
 | PR opened | Review | `pr: <url>` |
-| Worker wrote BLOCKED / cap hit | Blocked | `blocked: <reason>` / `cap: …` |
+| Worker wrote BLOCKED / cap hit | Blocked | `blocked: <reason>` / `blocked: cap: …` |
 | PR merged / closed | Done / Blocked | `merged: <sha>` (`merged: <sha> into release/r-n` for a release ticket) / `closed without merge` |
 | Release branch conflicts with main | Ready | `waiting: release R-n: …; repair task #N` |
 
