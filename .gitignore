@@ -22,3 +22,9 @@ pipeline.lock
 
 # repowise-managed agent context; regenerated locally after every commit
 .claude/CLAUDE.md
+
+# coverage (pytest --cov); ingested into repowise with `repowise coverage add`
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
