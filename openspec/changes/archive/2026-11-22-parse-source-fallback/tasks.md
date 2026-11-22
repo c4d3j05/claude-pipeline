@@ -7,5 +7,5 @@
 
 ## 2. Before archiving
 
-- [ ] 2.1 Report `repowise risk main..HEAD` and `repowise impacted-tests main..HEAD`
-- [ ] 2.2 In planner's integration spec, change "Source fallback form" from [decided, pending] to [code]
+- [x] 2.1 Report `repowise risk main..HEAD` and `repowise impacted-tests main..HEAD`
+- [x] 2.2 In planner's integration spec, change "Source fallback form" from [decided, pending] to [code]
