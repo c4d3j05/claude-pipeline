@@ -13,6 +13,7 @@ claude-pipeline = "dispatcher.__main__:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.5",
 ]
 dashboard = [

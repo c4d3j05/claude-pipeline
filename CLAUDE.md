@@ -15,6 +15,9 @@ and `claude_worker_pipeline.pdf`. This is the *pipeline itself*, not a target re
 ```bash
 uv run pytest           # whole suite
 uv run pytest tests/test_pipeline.py::test_slugify_and_task_slug
+# coverage, then refresh repowise's test-to-code map (impacted-tests, health)
+uv run pytest -o addopts=-q --cov=dispatcher --cov-report=xml --cov-context=test
+repowise coverage add coverage.xml .coverage
 ```
 
 ## Conventions
