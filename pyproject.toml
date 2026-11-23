@@ -12,12 +12,20 @@ claude-pipeline = "dispatcher.__main__:main"
 
 [dependency-groups]
 dev = [
+    "fastapi>=0.165.0",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
     "pytest>=8.0",
     "pytest-cov>=7.1.0",
     "ruff>=0.5",
 ]
 dashboard = [
     "textual>=0.60",
+]
+web = [
+    "fastapi>=0.165.0",
+    "jinja2>=3.1.6",
+    "uvicorn>=0.54.0",
 ]
 
 [tool.ruff]

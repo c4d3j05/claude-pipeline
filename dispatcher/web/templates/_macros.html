@@ -1,0 +1,26 @@
+{% macro unavailable(res) -%}
+  {% if not res.configured %}
+  <div class="card note">
+    <strong>{{ res.name|capitalize }} is not configured.</strong>
+    {% if res.name in ('planner', 'explorer') %}
+    Set <code>DASHBOARD_{{ res.name|upper }}_DIR</code> in claude-pipeline's <code>.env</code> to that checkout on this host.
+    {% else %}
+    Set <code>VIKUNJA_URL</code> and <code>VIKUNJA_PROJECT_ID</code>.
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="card error">
+    <strong>{{ res.name|capitalize }} could not be read.</strong>
+    <div class="mono">{{ res.error }}</div>
+    <div class="muted small">tried {{ res.fetched_at|ago }}</div>
+  </div>
+  {% endif %}
+{%- endmacro %}
+
+{% macro badge(state) -%}
+  <span class="badge s-{{ (state or 'unknown')|lower|replace(' ', '_') }}">{{ state or '?' }}</span>
+{%- endmacro %}
+
+{% macro link(url, text) -%}
+  {% if url|url %}<a href="{{ url|url }}" target="_blank" rel="noopener">{{ text }}</a>{% else %}{{ text }}{% endif %}
+{%- endmacro %}

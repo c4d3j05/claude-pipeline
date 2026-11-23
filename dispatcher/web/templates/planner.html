@@ -1,0 +1,43 @@
+{% from "_macros.html" import unavailable, badge, link %}
+{% if not res.ok %}{{ unavailable(res) }}{% else %}
+{% set d = res.data %}
+{% set listener = (d.listener or {}) %}
+<section class="grid cols-3">
+  <div class="card stat"><div class="muted">Listener</div>
+    <div class="big">{% if listener.running is sameas true %}running{% elif listener.running is sameas false %}stopped{% else %}unknown{% endif %}</div>
+    {% if listener.since %}<div class="muted small">since {{ listener.since|ago }}</div>{% endif %}</div>
+  <div class="card stat"><div class="muted">Today</div><div class="big">{{ d.spend_today_usd|money }}</div><div class="muted small">cap {{ d.daily_cap_usd|money }}</div></div>
+  <div class="card stat"><div class="muted">Investigations</div><div class="big">{{ (d.investigations or [])|length }}</div><div class="muted small">reported {{ d.generated_at|ago }}</div></div>
+</section>
+
+<section class="card">
+  <h2>Investigations</h2>
+  {% if d.investigations %}
+  <table>
+    <thead><tr><th>Id</th><th>State</th><th>Source</th><th>What</th><th>Spent</th><th>Updated</th></tr></thead>
+    <tbody>
+    {% for i in d.investigations %}
+    <tr><td class="mono">{{ link(i.thread_permalink, i.id) }}</td><td>{{ badge(i.state) }}</td>
+        <td>{{ i.source or '-' }}{% if i.batch_id %} <span class="label">{{ i.batch_id }}</span>{% endif %}</td>
+        <td class="clip">{{ i.title or i.flow or '' }}</td>
+        <td class="mono">{{ i.spent_usd|money }} / {{ i.cap_usd|money }}</td><td class="muted small">{{ (i.updated or i.created)|ago }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No investigations.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Filed</h2>
+  {% if d.filed %}
+  {% for f in d.filed %}
+  <div class="filed">
+    <div class="row between"><span>Investigation <span class="mono">{{ f.investigation }}</span>{% if f.release %} <span class="label">{{ f.release }}</span>{% endif %}</span><span class="muted small">{{ f.filed_at|ago }}</span></div>
+    <ul class="plain">
+      {% for t in f.tickets or [] %}<li>{{ link(t.url, '#' ~ t.vikunja_task_id) }} {{ t.title }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endfor %}
+  {% else %}<p class="muted">Nothing filed yet.</p>{% endif %}
+</section>
+{% endif %}

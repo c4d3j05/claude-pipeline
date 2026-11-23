@@ -1,0 +1,19 @@
+# Installed to ~/.config/systemd/user by scripts/install.sh (placeholders substituted); not enabled
+# by default. Read-only web dashboard with no login: bind it (DASHBOARD_HOST) to a trusted network.
+[Unit]
+Description=claude-pipeline web dashboard (read-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PIPELINE_DIR__
+Environment=PATH=__PATH__
+ExecStart=__UV__ run --group web claude-pipeline web
+Restart=always
+RestartSec=5
+StandardOutput=append:__PIPELINE_DIR__/logs/web.out.log
+StandardError=append:__PIPELINE_DIR__/logs/web.err.log
+
+[Install]
+WantedBy=default.target

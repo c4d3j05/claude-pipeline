@@ -1,0 +1,42 @@
+{% from "_macros.html" import unavailable, badge, link %}
+{% if not res.ok %}{{ unavailable(res) }}{% else %}
+{% set d = res.data %}
+{% set active = d.tasks|selectattr('state', 'in', ['claimed', 'working', 'testing', 'reviewing'])|list %}
+<section class="grid cols-3">
+  <div class="card stat"><div class="muted">Workers</div><div class="big">{{ d.active }} / {{ d.max_workers }}</div></div>
+  <div class="card stat"><div class="muted">Today</div><div class="big">{{ d.today_cost|money }}</div><div class="muted small">cap {{ d.cap|money }}</div></div>
+  <div class="card stat"><div class="muted">Dispatching</div><div class="big">{{ 'paused' if d.paused else 'running' }}</div></div>
+</section>
+
+<section class="card">
+  <h2>Working now</h2>
+  {% if active %}
+  <table>
+    <thead><tr><th>Task</th><th>State</th><th>Elapsed</th><th>Spent</th><th>Retries</th><th>Last activity</th></tr></thead>
+    <tbody>
+    {% for t in active %}
+    <tr><td>{{ link(t.url, '#' ~ t.task_id) }} <span class="muted small">{{ t.slug }}</span></td><td>{{ badge(t.state) }}</td>
+        <td class="mono">{{ t.elapsed }}</td><td class="mono">{{ t.cost|money }}</td><td class="mono">{{ t.retries }}</td>
+        <td class="clip">{{ t.activity }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No worker is busy.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Tickets</h2>
+  {% if d.tasks %}
+  <table>
+    <thead><tr><th>Task</th><th>State</th><th>Spent</th><th>PR</th><th>Started</th><th>Updated</th></tr></thead>
+    <tbody>
+    {% for t in d.tasks[:100] %}
+    <tr><td>{{ link(t.url, '#' ~ t.task_id) }} <span class="muted small">{{ t.slug }}</span></td><td>{{ badge(t.state) }}</td>
+        <td class="mono">{{ t.cost|money }}</td><td>{% if t.pr_url %}{{ link(t.pr_url, '#' ~ t.pr_url.rsplit('/', 1)[-1]) }}{% endif %}</td>
+        <td class="muted small">{{ t.started_at|ago }}</td><td class="muted small">{{ t.updated_at|ago }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No tickets yet.</p>{% endif %}
+</section>
+{% endif %}
