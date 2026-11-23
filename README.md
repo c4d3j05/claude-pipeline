@@ -159,6 +159,7 @@ host (OpenSpec change `web-dashboard`). One tab per area, each refreshed by HTMX
 | Pipeline | Busy workers (stage, elapsed, spend, last activity) and every ticket's history |
 | Planner | Open investigations and what was filed, with links to the Slack thread and the Vikunja tasks |
 | Explorer | UAT's commit, runs, findings filtered by state (including escalated), open and answered questions, batches and hotfixes |
+| Services | What `systemctl --user status` shows for every unit in `DASHBOARD_UNITS`: state, since when, PID, memory, CPU, restarts, timers' last and next run, and the processes running inside each one (a release test, a worker session). Read-only |
 
 ```bash
 uv sync --group web                 # once

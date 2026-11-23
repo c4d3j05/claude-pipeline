@@ -53,11 +53,11 @@ tr:last-child td { border-bottom: 0; }
 
 .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .75rem;
   font-weight: 600; background: var(--chip); color: var(--muted); white-space: nowrap; }
-.s-up, .s-done, .s-resolved, .s-filed, .s-merged, .s-verified, .s-running { color: var(--good); }
+.s-up, .s-done, .s-resolved, .s-filed, .s-merged, .s-verified, .s-running, .s-active { color: var(--good); }
 .s-claimed, .s-working, .s-testing, .s-reviewing, .s-pr_open, .s-sent, .s-fix_pending, .s-fix_merged,
 .s-provisioning, .s-investigating, .s-drafting, .s-batched { color: var(--accent); }
 .s-paused, .s-held, .s-veto, .s-capped, .s-interrupted, .s-waiting { color: var(--warn); }
-.s-down, .s-blocked, .s-escalated, .s-failed, .s-rejected, .s-invalid { color: var(--bad); }
+.s-down, .s-blocked, .s-escalated, .s-failed, .s-rejected, .s-invalid, .s-not_installed { color: var(--bad); }
 .label { display: inline-block; padding: 0 .4rem; margin-right: .25rem; border-radius: 4px;
   font-size: .72rem; background: var(--chip); color: var(--muted); }
 .label.hot, .alert-inline { color: var(--bad); }
@@ -92,3 +92,7 @@ tr:last-child td { border-bottom: 0; }
   .stat .big { font-size: 1.3rem; }
   .clip { max-width: 14rem; }
 }
+
+/* services tab */
+.proc { margin: .35rem 0 0; padding-left: 1rem; }
+.proc li { list-style: none; }

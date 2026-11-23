@@ -1,6 +1,6 @@
 """The FastAPI app: GET routes only. A page is a shell whose section HTMX loads and refreshes.
 
-  /, /board, /pipeline, /planner, /explorer   full pages (tabs)
+  /, /board, /pipeline, /planner, /explorer, /services   full pages (tabs)
   /section/<tab>                              the tab's content, polled every DASHBOARD_REFRESH_SEC
   /api/<source>.json                          a source as JSON (pipeline, board, planner, explorer)
   /healthz                                    liveness, for a monitor
@@ -21,7 +21,7 @@ from . import views
 from .sources import Sources
 
 HERE = Path(__file__).parent
-TABS = ("overview", "board", "pipeline", "planner", "explorer")
+TABS = ("overview", "board", "pipeline", "planner", "explorer", "services")
 FINDING_FILTERS = ("open", "escalated", "fix_pending", "fix_merged", "resolved", "dismissed", "all")
 
 

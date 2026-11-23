@@ -1,0 +1,35 @@
+{% from "_macros.html" import unavailable, badge %}
+{% if not res.ok %}{{ unavailable(res) }}{% else %}
+{% set d = res.data %}
+{% if not d.available %}
+<div class="card note"><strong>No systemd on this host.</strong> The Services tab works where the services run (the Debian host).</div>
+{% else %}
+<section class="card">
+  <h2>Services</h2>
+  <p class="muted small">What <code>systemctl --user status</code> shows for each unit. Read-only: nothing here starts or stops a service.</p>
+  <table>
+    <thead><tr><th>Unit</th><th>State</th><th>Since</th><th>PID</th><th>Memory</th><th>CPU</th><th>Restarts</th></tr></thead>
+    <tbody>
+    {% for u in d.units %}
+    <tr>
+      <td><strong class="mono">{{ u.unit }}</strong><div class="muted small">{{ u.description }}{% if u.enabled %} · {{ u.enabled }}{% endif %}</div></td>
+      <td>{% if not u.installed %}{{ badge('not installed') }}{% else %}{{ badge(u.active) }} <span class="muted small">{{ u.sub }}</span>{% endif %}
+          {% if u.active == 'failed' and u.result %}<div class="muted small">{{ u.result }}</div>{% endif %}</td>
+      <td class="muted small">{% if u.is_timer %}last {{ u.last_run or '–' }}<br>next {{ u.next_run or '–' }}{% else %}{{ u.since or '–' }}{% endif %}</td>
+      <td class="mono">{{ u.main_pid or '–' }}</td>
+      <td class="mono">{{ '%.0f MB'|format(u.memory_mb) if u.memory_mb is not none else '–' }}</td>
+      <td class="mono">{{ (u.cpu_sec ~ ' s') if u.cpu_sec is not none else '–' }}</td>
+      <td class="mono">{{ u.restarts }}</td>
+    </tr>
+    {% if u.processes %}
+    <tr><td colspan="7">
+      <div class="muted small">running now</div>
+      <ul class="proc mono small">{% for p in u.processes %}<li><span class="muted">{{ p.pid }}</span> {{ p.args }}</li>{% endfor %}</ul>
+    </td></tr>
+    {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endif %}
