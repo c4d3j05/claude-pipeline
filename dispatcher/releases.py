@@ -14,11 +14,13 @@ What the pipeline does with them:
   release; no other ticket of that release is claimed until it is done. A repair that resolves a
   conflict is merged with a merge commit, so main stays recorded as merged.
 - With RELEASE_AUTO_MERGE on, a ticket PR whose base is a release branch is merged by the pipeline
-  once its gates pass (after re-testing on the release head if the release moved). A PR into main is
-  never merged by the pipeline: `auto_merge_allowed` is the only gate and refuses any other base.
+  once its gates pass (after re-testing on the release head if the release moved).
 - When every subtask of a release is done and its head is green, the pipeline opens the
-  release -> main PR for a human to merge with a merge commit; once merged, the tracker moves to
-  Done and the release branch is deleted.
+  release -> main PR. With RELEASE_MERGE_TO_MAIN on it merges that PR itself, with a merge commit
+  (the owner's decision of 2026-11-22: releases are verified on UAT after they merge); otherwise a
+  human merges it. Once merged, the tracker moves to Done and the release branch is deleted.
+- `auto_merge_allowed` is the only gate for both merges. A ticket PR into main (a DM ticket, a
+  hotfix) is never merged by the pipeline, whatever the settings.
 
 Never raises into the tick: every failure is logged and retried on a later pass.
 """
@@ -67,10 +69,34 @@ def is_release_branch(branch: str | None) -> bool:
     return bool(RELEASE_BRANCH.fullmatch(branch or ""))
 
 
-def auto_merge_allowed(enabled: bool, base: str | None) -> bool:
-    """The only place that decides whether the pipeline may merge a PR itself: only when the
-    setting is on AND the PR's base is a release branch. A PR into main (or anything else) never."""
-    return bool(enabled) and is_release_branch(base)
+def auto_merge_allowed(*, tickets: bool, to_main: bool, head: str | None, base: str | None,
+                       base_branch: str) -> bool:
+    """The only place that decides whether the pipeline may merge a PR itself:
+    - a ticket PR into a release branch, when RELEASE_AUTO_MERGE (`tickets`) is on;
+    - the release PR (head release/r-n, base BASE_BRANCH), when RELEASE_MERGE_TO_MAIN (`to_main`) is on.
+    Anything else never: a ticket PR into main (a DM ticket, a hotfix) is a human's to merge whatever
+    the settings, and so is a PR between release branches."""
+    if is_release_branch(base):
+        return bool(tickets) and not is_release_branch(head)
+    return bool(to_main) and bool(base_branch) and base == base_branch and is_release_branch(head)
+
+
+def merge_messages(rel: str, url: str, base: str, outcome: str, why: str) -> tuple[str | None, str]:
+    """(tracker comment or None, Slack alert) for how the release PR's merge went: `merged`,
+    `queued` (GitHub merges it once main's required checks pass), `refused` (it waits for the owner;
+    the open PR is not retried) or `off` (RELEASE_MERGE_TO_MAIN off: a human merges it). The
+    tracker's `merged: <sha9> into <base> (<url>)` comment comes later, from the merged PR."""
+    ready = f"Release {rel}: every ticket is merged and its head is green"
+    by_hand = f"Merge it with a MERGE COMMIT (not squash), so explorer can trace each fix on UAT: {url}"
+    if outcome == "merged":
+        return None, f"{ready}; the pipeline merged it into {base} with a merge commit: {url}"
+    if outcome == "queued":
+        return (f"auto-merge into {base} is on; GitHub merges it once the required checks pass ({url})",
+                f"{ready}; GitHub merges it into {base} (merge commit) once the required checks pass: {url}")
+    if outcome == "refused":
+        return (f"not merged into {base}: {why}; the owner merges it with a merge commit ({url})",
+                f"Release {rel} needs you: the pipeline could not merge it ({why}). {by_hand}")
+    return None, f"Release {rel} is ready: every ticket is merged and its head is green. {by_hand}"
 
 
 def labels_of(task: dict) -> set[str]:

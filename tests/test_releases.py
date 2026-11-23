@@ -3,6 +3,7 @@ release PR. Git runs for real against a local bare origin; Vikunja, gh and Slack
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import subprocess
 from pathlib import Path
@@ -62,12 +63,27 @@ def test_release_line_parsing():
     assert rl.is_tracker({"labels": [{"title": "release-tracker"}]})
 
 
-@pytest.mark.parametrize("enabled,base,ok", [
-    (True, "release/r-4", True), (False, "release/r-4", False), (True, "main", False),
-    (True, "master", False), (True, "release/r-4-evil", False), (True, "feature/release/r-4", False),
-    (True, "", False), (True, None, False)])
-def test_auto_merge_is_only_ever_for_release_branches(enabled, base, ok):
-    assert rl.auto_merge_allowed(enabled, base) is ok
+@pytest.mark.parametrize("tickets,to_main,head,base,ok", [
+    # ticket PRs into a release branch: RELEASE_AUTO_MERGE alone decides
+    (True, False, "task-7-fix", "release/r-4", True), (True, True, "task-7-fix", "release/r-4", True),
+    (False, True, "task-7-fix", "release/r-4", False), (False, False, "task-7-fix", "release/r-4", False),
+    (True, False, None, "release/r-4", True),
+    # the release PR into main: RELEASE_MERGE_TO_MAIN alone decides
+    (False, True, "release/r-4", "main", True), (True, True, "release/r-4", "main", True),
+    (True, False, "release/r-4", "main", False), (False, False, "release/r-4", "main", False),
+    # a ticket PR into main (a DM ticket, a hotfix) never, whatever the settings
+    (True, True, "task-7-fix", "main", False), (True, True, None, "main", False),
+    (True, True, "release/r-4-evil", "main", False), (True, True, "feature/release/r-4", "main", False),
+    # anything else never
+    (True, True, "release/r-4", "release/r-5", False), (True, True, "release/r-4", "master", False),
+    (True, True, "task-7", "release/r-4-evil", False), (True, True, "task-7", "feature/release/r-4", False),
+    (True, True, "release/r-4", "", False), (True, True, "release/r-4", None, False)])
+def test_auto_merge_decides_every_case_in_one_place(tickets, to_main, head, base, ok):
+    assert rl.auto_merge_allowed(tickets=tickets, to_main=to_main, head=head, base=base, base_branch="main") is ok
+
+
+def test_an_empty_base_branch_never_allows_a_merge_to_main():
+    assert not rl.auto_merge_allowed(tickets=True, to_main=True, head="release/r-4", base="", base_branch="")
 
 
 def test_merge_into_release_never_calls_gh_for_main(tmp_path, monkeypatch):
@@ -82,6 +98,54 @@ def test_merge_into_release_never_calls_gh_for_main(tmp_path, monkeypatch):
     assert "--merge" in calls[-1] and "--match-head-commit" in calls[-1]
     off = _cfg(tmp_path, RELEASE_AUTO_MERGE="false")
     assert not prmod.merge_into_release(off, "https://gh/pr/3", "release/r-4", "abc", merge_commit=False)[0]
+    both = _cfg(tmp_path, RELEASE_AUTO_MERGE="true", RELEASE_MERGE_TO_MAIN="true")
+    n = len(calls)
+    assert not prmod.merge_into_release(both, "https://gh/pr/4", "main", "abc", merge_commit=True)[0]
+    assert len(calls) == n                                   # a ticket PR into main: no gh call at all
+
+
+def _gh(monkeypatch, *results):
+    """Fake `subprocess.run` for gh: each call takes the next return code from `results`."""
+    calls, codes = [], list(results)
+
+    def run(args, **kw):
+        calls.append(args)
+        rc = codes.pop(0)
+        return subprocess.CompletedProcess(args, rc, "", "" if rc == 0 else f"refused #{len(calls)}")
+    monkeypatch.setattr(prmod.subprocess, "run", run)
+    return calls
+
+
+def test_the_release_pr_is_merged_with_a_merge_commit_at_the_tested_head(tmp_path, monkeypatch):
+    calls = _gh(monkeypatch, 0)
+    cfg = _cfg(tmp_path, RELEASE_MERGE_TO_MAIN="true")
+    assert prmod.merge_release_into_main(cfg, "https://gh/pr/9", "release/r-4", "abc123") == ("merged", "")
+    assert calls == [["gh", "pr", "merge", "https://gh/pr/9", "--merge", "--match-head-commit", "abc123"]]
+
+
+def test_pending_checks_hand_the_release_pr_to_githubs_auto_merge(tmp_path, monkeypatch):
+    calls = _gh(monkeypatch, 1, 0)
+    cfg = _cfg(tmp_path, RELEASE_MERGE_TO_MAIN="true")
+    assert prmod.merge_release_into_main(cfg, "https://gh/pr/9", "release/r-4", "abc123") == ("queued", "")
+    assert calls[1] == ["gh", "pr", "merge", "https://gh/pr/9", "--merge", "--auto", "--match-head-commit", "abc123"]
+
+
+def test_a_refused_release_merge_is_tried_once_and_never_squashed(tmp_path, monkeypatch):
+    calls = _gh(monkeypatch, 1, 1)
+    cfg = _cfg(tmp_path, RELEASE_MERGE_TO_MAIN="true")
+    outcome, why = prmod.merge_release_into_main(cfg, "https://gh/pr/9", "release/r-4", "abc123")
+    assert outcome == "refused" and why == "refused #2" and len(calls) == 2
+    assert all("--squash" not in c and "--rebase" not in c and "--merge" in c for c in calls)
+
+
+@pytest.mark.parametrize("env,branch,sha", [
+    ({"RELEASE_MERGE_TO_MAIN": "false", "RELEASE_AUTO_MERGE": "true"}, "release/r-4", "abc"),
+    ({"RELEASE_MERGE_TO_MAIN": "true"}, "task-7-fix", "abc"),
+    ({"RELEASE_MERGE_TO_MAIN": "true"}, "release/r-4", "")])
+def test_the_release_merge_refuses_without_calling_gh(tmp_path, monkeypatch, env, branch, sha):
+    calls = _gh(monkeypatch)
+    outcome, _ = prmod.merge_release_into_main(_cfg(tmp_path, **env), "https://gh/pr/9", branch, sha)
+    assert outcome == "refused" and calls == []
 
 
 # --- release branches in git --------------------------------------------------------------------
@@ -257,7 +321,6 @@ def test_a_release_ticket_forks_from_and_merges_into_its_release(release_pipelin
 
 def test_auto_merge_off_leaves_the_pr_for_a_human(release_pipeline, fake_bin):
     d, ev = release_pipeline
-    import dataclasses
     d.cfg = dataclasses.replace(d.cfg, release_auto_merge=False)
     d.run_pipeline({"id": 1, "title": "x", "description": DESC}, "task-1-x")
     assert ev["prs"] == [("task-1-x", "release/r-4")] and ev["merges"] == []
@@ -352,6 +415,42 @@ def test_a_finished_release_gets_its_pr_to_main(tmp_path, monkeypatch):
     assert (branch, title) == ("release/r-4", "Release R-4") and "merge commit, not a squash" in body
     assert "#1 Fix A" in body and "Tracker: #900" in body and (900, "pr: https://gh/pr/9") in ev["comments"]
     assert "MERGE COMMIT" in ev["alerts"][-1]
+
+
+@pytest.mark.parametrize("outcome,note,said", [
+    ("merged", None, "the pipeline merged it into main with a merge commit"),
+    ("queued", "auto-merge into main is on", "once the required checks pass"),
+    ("refused", "not merged into main: protected; the owner merges it", "needs you")])
+def test_with_merge_to_main_on_the_pipeline_merges_the_release_pr(tmp_path, monkeypatch, outcome, note, said):
+    d, ev = _release_dispatcher(tmp_path, monkeypatch, [{"id": 1, "title": "Fix A", "done": True}],
+                                [_t(1, "Fix A", DESC)])
+    d.cfg = dataclasses.replace(d.cfg, release_merge_to_main=True)
+    merges = []
+    monkeypatch.setattr(d.rgit, "sha", lambda ref: "feedface" if ref == "origin/release/r-4" else "")
+    monkeypatch.setattr(dmod.prmod, "merge_release_into_main",
+                        lambda cfg, url, branch, sha: merges.append((url, branch, sha)) or
+                        (outcome, "protected" if outcome == "refused" else ""))
+    d.release_pass()
+    assert merges == [("https://gh/pr/9", "release/r-4", "feedface")]
+    tracker_notes = [c for tid, c in ev["comments"] if tid == 900 and not c.startswith("pr: ")]
+    assert (tracker_notes == []) if note is None else (note in tracker_notes[0])
+    assert said in ev["alerts"][-1] and "https://gh/pr/9" in ev["alerts"][-1]
+
+
+def test_an_open_release_pr_is_not_merged_again(tmp_path, monkeypatch):
+    prs = [{"state": "OPEN", "headRefName": "release/r-4", "baseRefName": "main", "url": "https://gh/pr/9"}]
+    d, ev = _release_dispatcher(tmp_path, monkeypatch, [{"id": 1, "done": True}], [_t(1, "Fix A", DESC)], prs)
+    d.cfg = dataclasses.replace(d.cfg, release_merge_to_main=True)
+    monkeypatch.setattr(dmod.prmod, "merge_release_into_main", lambda *a: pytest.fail("merged twice"))
+    d.release_pass()
+    assert ev["created"] == [] and ev["alerts"] == []
+
+
+def test_with_merge_to_main_off_the_release_pr_waits_for_a_human(tmp_path, monkeypatch):
+    d, ev = _release_dispatcher(tmp_path, monkeypatch, [{"id": 1, "done": True}], [_t(1, "Fix A", DESC)])
+    monkeypatch.setattr(dmod.prmod, "merge_release_into_main", lambda *a: pytest.fail("merged with the setting off"))
+    d.release_pass()
+    assert ev["created"] and "MERGE COMMIT" in ev["alerts"][-1] and "needs you" not in ev["alerts"][-1]
 
 
 def test_a_red_head_at_the_end_files_a_repair(tmp_path, monkeypatch):

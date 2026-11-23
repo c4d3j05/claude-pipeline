@@ -166,6 +166,11 @@ task (label `release-tracker`, never claimed) with every ticket as its subtask. 
 explorer's OpenSpec change `release-batches` (design.md, "Wire contract"); [`RELEASES.md`](RELEASES.md)
 describes what this repo does with it and which settings turn it on.
 
+Who merges what (the owner's decisions of 2026-11-22): ticket PRs into `release/r-n` are merged by
+the pipeline with `RELEASE_AUTO_MERGE=true`; the release PR into `main` is merged by the pipeline,
+with a merge commit, with `RELEASE_MERGE_TO_MAIN=true`. A release is then verified by explorer on
+UAT after it merges. A ticket PR into `main` (a DM ticket, a hotfix) is always a human's to merge.
+
 ## Status write-back
 
 | Event | Bucket | Comment |

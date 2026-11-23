@@ -959,7 +959,8 @@ class Dispatcher:
         """Merge a release ticket's PR into its release branch, when RELEASE_AUTO_MERGE is on. If the
         release moved since the ticket branched, take the new head and pass the tests again first.
         A conflict, a red gate or a refused merge leaves the PR open for a human. Never into main."""
-        if not releases.auto_merge_allowed(self.cfg.release_auto_merge, target.branch):
+        if not releases.auto_merge_allowed(tickets=self.cfg.release_auto_merge, to_main=self.cfg.release_merge_to_main,
+                                           head=None, base=target.branch, base_branch=self.cfg.base_branch):
             return
         with self._release_lock(target.release):
             up = self.rgit.update_ticket(worktree, target.branch)
@@ -1045,9 +1046,13 @@ class Dispatcher:
             url = prmod.create_release_pr(self.cfg, branch, f"Release {rel}",
                                           _release_body(rel, t, subs, self.task_link))
             self.comment(t["id"], f"pr: {url}")
-            self.slack.alert(f"Release {rel} is ready: every ticket is merged and its head is green. Merge it "
-                             f"with a MERGE COMMIT (not squash), so explorer can trace each fix on UAT: {url}")
-            log.info("release %s -> PR %s", rel, url)
+            outcome, why = (prmod.merge_release_into_main(self.cfg, url, branch, self.rgit.sha(f"origin/{branch}"))
+                            if self.cfg.release_merge_to_main else ("off", ""))
+            note, alert = releases.merge_messages(rel, url, self.cfg.base_branch, outcome, why)
+            if note:
+                self.comment(t["id"], note)
+            self.slack.alert(alert)
+            log.info("release %s -> PR %s (%s)", rel, url, outcome)
 
     def _release_head_green(self, rel: str, branch: str) -> tuple[bool, str]:
         """The test gate (and RELEASE_CHECK_CMD) on the release head, once per head commit."""

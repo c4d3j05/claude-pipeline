@@ -118,9 +118,12 @@ class Config:
     settings_file: str = ".claude/worker-settings.json"
 
     # Releases (explorer's release-batches): tickets with a `Release:` line build on release/r-n.
-    # The pipeline merges a ticket PR into a release branch itself only when this is on; a PR into
-    # main is never merged by the pipeline, whatever this says.
+    # The pipeline merges a ticket PR into a release branch itself only when this is on. A ticket
+    # PR into main is never merged by the pipeline, whatever these say.
     release_auto_merge: bool = False
+    # Merge the release PR (release/r-n -> main) itself, with a merge commit, once every ticket is
+    # done and the release head is green. Off: the release PR waits for a human.
+    release_merge_to_main: bool = False
     release_pr_label: str = "claude-release"
     # Extra check on a release head after the test suite (e.g. a migrations consistency check),
     # run inside the release workspace; empty = none.
@@ -187,6 +190,7 @@ def load(env_file: str | None = ".env") -> Config:
                         if p.strip()),
         db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),
         release_auto_merge=_str(src, "RELEASE_AUTO_MERGE", "false").lower() in ("1", "true", "yes", "on"),
+        release_merge_to_main=_str(src, "RELEASE_MERGE_TO_MAIN", "false").lower() in ("1", "true", "yes", "on"),
         release_pr_label=_str(src, "RELEASE_PR_LABEL", "claude-release"),
         release_check_cmd=_str(src, "RELEASE_CHECK_CMD"),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),
