@@ -2,8 +2,8 @@
 
 How claude-pipeline builds a release: a set of tickets that reach `main` together, as one pull
 request merged with a merge commit. The contract shared with claude-planner and explorer is
-explorer's OpenSpec change `release-batches` (`openspec/changes/release-batches/design.md`, section
-"Wire contract"). This file says what this repo does with it.
+planner's integration spec (`openspec/specs/integration/spec.md` in the planner repo); explorer's
+change `release-batches`, now archived, specified it first. This file says what this repo does with it.
 
 **Not yet in `spec.md`.** `spec.md` says a human merges every PR and that auto-merge is out of scope.
 The owner decided on 2026-11-22:

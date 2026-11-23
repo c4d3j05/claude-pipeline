@@ -1,7 +1,7 @@
 """Releases: tickets that build on a release branch instead of main.
 
-claude-planner files a batch of explorer's findings as one release (see explorer's OpenSpec change
-`release-batches`, design.md "Wire contract"). On board 51 a release is:
+claude-planner files a batch of explorer's findings as one release (formats: planner's integration
+spec, `openspec/specs/integration/spec.md`). On board 51 a release is:
 - a tracking task titled "Release R-n", labelled `release-tracker` (never claimed: no `claude` label),
   whose subtasks are the release's tickets;
 - on each ticket a line `Release: R-n · branch release/r-n`.
