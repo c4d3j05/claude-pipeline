@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Factory · {{ tab|capitalize }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">Factory <span class="muted">read-only</span></div>
+    <nav class="tabs">
+      {% for t in tabs %}
+      <a href="/{{ '' if t == 'overview' else t }}" class="{{ 'active' if t == tab }}">{{ t|capitalize }}</a>
+      {% endfor %}
+    </nav>
+  </header>
+  <main id="section"
+        hx-get="/section/{{ tab }}{{ query }}"
+        hx-trigger="load, every {{ refresh }}s"
+        hx-swap="innerHTML">
+    <p class="muted loading">Loading…</p>
+  </main>
+  <footer class="muted">Refreshes every {{ refresh }} s · nothing on this page changes anything</footer>
+</body>
+</html>

@@ -6,6 +6,7 @@ Commands:
   cleanup      Run one PR-close cleanup pass and exit.
   nightly      Run the nightly pass (ntree doctor + report) and exit.
   prepare-repo Drop worker-settings.json + CLAUDE.md template into the target repo.
+  web          Serve the read-only web dashboard.
 """
 
 from __future__ import annotations
@@ -61,6 +62,18 @@ def cmd_dashboard(args) -> int:
     from . import dashboard
 
     return dashboard.run(args.env)
+
+
+def cmd_web(args) -> int:
+    cfg = _load(args.env)
+    try:
+        from .web.app import serve
+    except ModuleNotFoundError as e:
+        print(f"The web dashboard needs its dependencies ({e.name}). Install them with:\n"
+              "  uv sync --group web", file=sys.stderr)
+        return 1
+    print(f"dashboard on http://{cfg.dashboard_host}:{cfg.dashboard_port} (read-only)")
+    return serve(cfg)
 
 
 def cmd_selftest(args) -> int:
@@ -228,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     dash.add_argument("--state", default="all", choices=["all", "active", "blocked", "pr_open", "done"],
                       help="with --once: only show tasks in this state group")
     dash.set_defaults(func=cmd_dashboard)
+    sub.add_parser("web", help="read-only web dashboard (DASHBOARD_HOST:DASHBOARD_PORT)").set_defaults(func=cmd_web)
     pr = sub.add_parser("prepare-repo", help="install worker-settings.json + CLAUDE.md into target repo")
     pr.add_argument("--force", action="store_true", help="overwrite an existing CLAUDE.md")
     pr.set_defaults(func=cmd_prepare_repo)

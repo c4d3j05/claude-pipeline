@@ -129,6 +129,13 @@ class Config:
     # run inside the release workspace; empty = none.
     release_check_cmd: str = ""
 
+    # Web dashboard (`claude-pipeline web`): read-only, no login, so bind it to a trusted network.
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8090
+    dashboard_planner_dir: str = ""    # claude-planner checkout on this host; empty = not shown
+    dashboard_explorer_dir: str = ""   # explorer checkout on this host; empty = not shown
+    dashboard_refresh_sec: int = 15
+
     # Knobs the dashboard may edit and the daemon hot-reloads each tick.
     HOT_KEYS = (
         "MAX_WORKERS", "POLL_INTERVAL", "DAILY_CAP_USD", "TASK_CAP_USD",
@@ -193,6 +200,11 @@ def load(env_file: str | None = ".env") -> Config:
         release_merge_to_main=_str(src, "RELEASE_MERGE_TO_MAIN", "false").lower() in ("1", "true", "yes", "on"),
         release_pr_label=_str(src, "RELEASE_PR_LABEL", "claude-release"),
         release_check_cmd=_str(src, "RELEASE_CHECK_CMD"),
+        dashboard_host=_str(src, "DASHBOARD_HOST", "127.0.0.1"),
+        dashboard_port=_int(src, "DASHBOARD_PORT", 8090),
+        dashboard_planner_dir=_str(src, "DASHBOARD_PLANNER_DIR"),
+        dashboard_explorer_dir=_str(src, "DASHBOARD_EXPLORER_DIR"),
+        dashboard_refresh_sec=max(5, _int(src, "DASHBOARD_REFRESH_SEC", 15)),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),
         slack_bot_token=_str(src, "SLACK_BOT_TOKEN"),
         db_path=Path(_str(src, "PIPELINE_DB", "pipeline.db")).expanduser(),

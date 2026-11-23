@@ -36,7 +36,7 @@ else
   # claude, git, poetry (pyenv) and docker usually live on Linux.
   DAEMON_PATH="$HOME/.pyenv/shims:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   mkdir -p "$UNITS"
-  for unit in dispatcher.service nightly.service; do
+  for unit in dispatcher.service nightly.service web.service; do
     render "$PIPELINE_DIR/systemd/claude-pipeline-$unit" "$UNITS/claude-pipeline-$unit" "$DAEMON_PATH"
   done
   cp "$PIPELINE_DIR/systemd/claude-pipeline-nightly.timer" "$UNITS/"
@@ -53,4 +53,6 @@ else
   echo "  journalctl --user -u claude-pipeline-dispatcher -f   # or tail -f \"$PIPELINE_DIR/logs/dispatcher.err.log\""
   echo "Stop everything with:"
   echo "  systemctl --user disable --now claude-pipeline-dispatcher.service claude-pipeline-nightly.timer"
+  echo "The read-only web dashboard is installed but off. Set DASHBOARD_* in .env, then:"
+  echo "  uv sync --group web && systemctl --user enable --now claude-pipeline-web.service"
 fi

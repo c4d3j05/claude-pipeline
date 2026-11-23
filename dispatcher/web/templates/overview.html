@@ -1,0 +1,36 @@
+{% from "_macros.html" import badge %}
+<section class="grid cols-3">
+  {% for h in health %}
+  <div class="card">
+    <div class="row between"><h3>{{ h.service|capitalize }}</h3>{{ badge(h.state) }}</div>
+    <p class="muted">{{ h.detail }}</p>
+  </div>
+  {% endfor %}
+</section>
+
+<section class="card">
+  <h2>Alerts</h2>
+  {% if alerts %}
+  <ul class="alerts">
+    {% for a in alerts %}
+    <li class="alert {{ a.level }}"><a href="/{{ '' if a.tab == 'overview' else a.tab }}">{{ a.service }}</a> {{ a.text }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">Nothing needs you right now.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Spend today</h2>
+  {% if spend %}
+  {% for s in spend %}
+  <div class="spend">
+    <div class="row between"><span>{{ s.service|capitalize }}</span><span class="mono">{{ s.spent|money }} of {{ s.cap|money }}</span></div>
+    <div class="bar"><div class="fill {{ 'hot' if s.pct is not none and s.pct >= 90 }}" style="width: {{ s.pct or 0 }}%"></div></div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <p class="muted">No service reported its spend.</p>
+  {% endif %}
+</section>

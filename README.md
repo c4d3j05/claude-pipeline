@@ -128,6 +128,7 @@ test run beyond removing credentials from it.
 | `nightly` | Run the nightly maintenance pass (`ntree doctor` + report). |
 | `prepare-repo` | Drop `worker-settings.json` + `CLAUDE.md` template into `TARGET_REPO_PATH`. |
 | `dashboard` | Terminal control panel: live worker status + edit config + pause/retry/cancel (`--once` for a one-shot text snapshot). |
+| `web` | Read-only web dashboard for the whole factory: pipeline, the Vikunja board, claude-planner and explorer. |
 
 ## Dashboard
 
@@ -144,6 +145,40 @@ task · `o` open the selected PR · `e` edit config · `q` quit. Config edits (`
 `DAILY_CAP_USD`, `POLL_INTERVAL`, models, permission mode) are written to `.env` and the
 daemon **hot-reloads them each tick** — no restart, no interrupted workers. Controls go
 through a `control` row / `cancel_requested` flag in the ledger that the daemon honors.
+
+## Web dashboard
+
+A read-only page for the whole factory, so you can see what is going on without logging into the
+host (OpenSpec change `web-dashboard`). One tab per area, each refreshed by HTMX every
+`DASHBOARD_REFRESH_SEC`:
+
+| Tab | Shows |
+|---|---|
+| Overview | Each service's health, today's spend against its cap, and alerts: blocked tasks, a paused dispatcher, main ahead of UAT, a batch the planner has not picked up, findings waiting for your answer, a service that cannot be read |
+| Board | The Vikunja board by bucket, release trackers first, each task linked |
+| Pipeline | Busy workers (stage, elapsed, spend, last activity) and every ticket's history |
+| Planner | Open investigations and what was filed, with links to the Slack thread and the Vikunja tasks |
+| Explorer | UAT's commit, runs, findings filtered by state (including escalated), open and answered questions, batches and hotfixes |
+
+```bash
+uv sync --group web                 # once
+uv run claude-pipeline web          # http://DASHBOARD_HOST:DASHBOARD_PORT
+```
+
+It never writes: the ledger and Vikunja are only read, and claude-planner and explorer are asked for
+`status --json` (schema 1, in planner's integration spec) by running `uv run <cli> status --json` in
+`DASHBOARD_PLANNER_DIR` and `DASHBOARD_EXPLORER_DIR` on the same host. Each answer is reused for
+`DASHBOARD_REFRESH_SEC`, so open browsers do not multiply the work. A service that cannot be read
+shows an error card; the rest of the page keeps working. `/api/<source>.json` returns the raw data
+and `/healthz` answers for a monitor.
+
+**There is no login.** Anyone who can reach the port sees tasks, findings and costs. On a VM that
+only your local network reaches, set `DASHBOARD_HOST=0.0.0.0`; otherwise keep `127.0.0.1` and use an
+SSH tunnel. On Linux, `scripts/install.sh` installs `claude-pipeline-web.service` but leaves it off:
+
+```bash
+systemctl --user enable --now claude-pipeline-web.service
+```
 
 ## Authoring tasks
 
@@ -199,6 +234,8 @@ dispatcher/        the daemon (poll, claim, prompt, worker, gate, review, PR, cl
   releases.py      release branches: Release lines, sync with main, repairs, the auto-merge guard
   cleanup.py       PR-close teardown + nightly maintenance
   daemon.py        the main loop and per-task pipeline
+  dashboard.py     terminal dashboard data + controls (gather_status)
+  web/             read-only web dashboard: sources (cache), views (alerts), app (FastAPI + HTMX)
 templates/         worker-settings.json + CLAUDE.md template dropped into target repos
 launchd/           dispatcher (KeepAlive) + nightly (03:00) agents
 scripts/install.sh install the launchd agents

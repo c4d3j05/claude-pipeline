@@ -1,0 +1,75 @@
+{% from "_macros.html" import unavailable, badge, link %}
+{% if not res.ok %}{{ unavailable(res) }}{% else %}
+{% set d = res.data %}
+{% set uat = (d.uat or {}) %}
+{% set q = (d.questions or {}) %}
+<section class="grid cols-3">
+  <div class="card stat"><div class="muted">UAT runs</div><div class="big mono">{{ uat.commit|short }}</div>
+    <div class="muted small">{% if uat.main_head and uat.main_head != uat.commit %}main is at {{ uat.main_head|short }}{% else %}level with main{% endif %} · tick {{ uat.last_tick|ago }}</div></div>
+  <div class="card stat"><div class="muted">Today</div><div class="big">{{ d.spend_today_usd|money }}</div><div class="muted small">cap {{ d.daily_cap_usd|money }}</div></div>
+  <div class="card stat"><div class="muted">Now</div>
+    {% if d.active_run %}<div class="big">{{ d.active_run.stage or d.active_run.reason or 'running' }}</div><div class="muted small">run {{ d.active_run.id }} · {{ d.active_run.spent_usd|money }}</div>
+    {% elif d.paused %}<div class="big">paused</div><div class="muted small">{{ d.paused }}</div>
+    {% else %}<div class="big">idle</div>{% endif %}</div>
+</section>
+
+<section class="card">
+  <div class="row between"><h2>Findings</h2>
+    <div class="chips">{% for f in filters %}<a class="chip {{ 'active' if f == state }}" href="/explorer?state={{ f }}">{{ f|replace('_', ' ') }}{% if counts.get(f) %} <span class="count">{{ counts[f] }}</span>{% endif %}</a>{% endfor %}</div></div>
+  {% if findings %}
+  <table>
+    <thead><tr><th>Finding</th><th>State</th><th>Route</th><th>Tasks</th><th>Fixes failed</th><th>Last seen</th></tr></thead>
+    <tbody>
+    {% for f in findings[:200] %}
+    <tr><td>{{ link(f.permalink, f.title or f.id) }} <span class="muted small mono">{{ f.id }}</span>
+          {% if f.escalation %}<div class="small alert-inline">waits for you: {{ f.escalation.reason|replace('_', ' ') }}</div>{% endif %}</td>
+        <td>{{ badge(f.state) }}</td><td class="mono small">{{ f.route or '-' }}</td>
+        <td class="mono small">{% for t in f.tasks or [] %}#{{ t }} {% endfor %}{% if f.batch_id %}<span class="label">{{ f.batch_id }}</span>{% endif %}{% if f.hotfix_id %}<span class="label">{{ f.hotfix_id }}</span>{% endif %}</td>
+        <td class="mono">{{ f.failed_fixes or 0 }}</td><td class="muted small">{{ f.last_seen|ago }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">No findings in this view.</p>{% endif %}
+</section>
+
+<section class="grid cols-2">
+  <div class="card">
+    <h2>Open questions <span class="count">{{ (q.open or [])|length }}</span></h2>
+    {% for x in q.open or [] %}
+    <div class="question">{% if x.kind == 'escalation' %}<span class="label hot">escalation</span>{% endif %} {{ link(x.permalink, x.question) }}
+      <div class="muted small">{{ x.route or '' }} · asked {{ x.asked|ago }}</div></div>
+    {% else %}<p class="muted">None.</p>{% endfor %}
+  </div>
+  <div class="card">
+    <h2>Recently answered</h2>
+    {% for x in q.answered_recent or [] %}
+    <div class="question">{{ x.question }}<div class="small">→ {{ x.answer }}</div><div class="muted small">{{ x.answered|ago }}</div></div>
+    {% else %}<p class="muted">None.</p>{% endfor %}
+  </div>
+</section>
+
+<section class="grid cols-2">
+  <div class="card">
+    <h2>Batches</h2>
+    {% for b in d.batches or [] %}
+    <div class="filed"><div class="row between"><span class="mono">{{ b.id }}</span>{{ badge(b.state) }}</div>
+      <div class="muted small">{{ b.findings }} finding(s){% if b.release %} · {{ b.release }}{% endif %}{% if b.sent %} · sent {{ b.sent|ago }}{% endif %}{% if b.resends %} · resent {{ b.resends }}×{% endif %}</div>
+      {% if b.events %}<ul class="plain small muted">{% for e in b.events[-3:] %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}</div>
+    {% else %}<p class="muted">No batches.</p>{% endfor %}
+    {% if d.hotfixes %}<h3>Hotfixes</h3>
+    {% for h in d.hotfixes %}<div class="row between small"><span class="mono">{{ h.id }}</span><span>{{ h.status or 'sent' }} · {{ h.sent|ago }}</span></div>{% endfor %}{% endif %}
+  </div>
+  <div class="card">
+    <h2>Runs</h2>
+    <table>
+      <thead><tr><th>Run</th><th>Commit</th><th>Reason</th><th>State</th><th>Spent</th><th>Found</th></tr></thead>
+      <tbody>
+      {% for r in (d.runs or [])[:30] %}
+      <tr><td class="mono small">{{ r.id }}</td><td class="mono small">{{ r.commit|short }}</td><td class="small">{{ r.reason }}</td>
+          <td>{{ badge(r.state) }}</td><td class="mono small">{{ r.spent_usd|money }}</td><td class="mono">{{ r.findings }}</td></tr>
+      {% else %}<tr><td colspan="6" class="muted">No runs.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}

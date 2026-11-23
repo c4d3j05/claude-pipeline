@@ -1,0 +1,30 @@
+{% from "_macros.html" import unavailable, link %}
+{% if not res.ok %}{{ unavailable(res) }}{% else %}
+{% set d = res.data %}
+{% if d.releases %}
+<section class="card">
+  <h2>Releases</h2>
+  <ul class="plain">
+    {% for t in d.releases %}
+    <li>{{ link(t.url, t.title) }} {% if t.done %}<span class="badge s-done">done</span>{% else %}<span class="badge s-working">open</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+<section class="board">
+  {% for b in d.buckets %}
+  <div class="column">
+    <h3>{{ b.title }} <span class="count">{{ b.tasks|length }}</span></h3>
+    {% for t in b.tasks[:40] %}
+    <div class="task {{ 'tracker' if t.tracker }}">
+      <div>{{ link(t.url, '#' ~ t.id) }} {{ t.title }}</div>
+      <div class="labels">{% for l in t.labels %}<span class="label">{{ l }}</span>{% endfor %}<span class="muted small">{{ t.updated|ago }}</span></div>
+    </div>
+    {% else %}
+    <p class="muted small">empty</p>
+    {% endfor %}
+    {% if b.tasks|length > 40 %}<p class="muted small">and {{ b.tasks|length - 40 }} more</p>{% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}

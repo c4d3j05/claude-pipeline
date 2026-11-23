@@ -193,7 +193,7 @@ def run(env_file: str = ".env") -> int:
     try:
         from .tui import DashboardApp
     except ModuleNotFoundError as e:
-        if "textual" in str(e):
+        if e.name in ("textual", "rich"):     # rich comes with textual; tui.py imports it first
             print("The dashboard needs Textual. Install it with:\n"
                   "  uv sync --group dashboard\nOr use `claude-pipeline dashboard --once`.")
             return 1
