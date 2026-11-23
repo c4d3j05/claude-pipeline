@@ -163,7 +163,7 @@ All via `.env` (see [`.env.example`](.env.example)). Key knobs: `MAX_WORKERS` (4
 A ticket whose description has `Release: R-n · branch release/r-n` builds on that release branch,
 not on main. claude-planner files these for a batch of explorer findings: a "Release R-n" tracking
 task (label `release-tracker`, never claimed) with every ticket as its subtask. The full contract is
-explorer's OpenSpec change `release-batches` (design.md, "Wire contract"); [`RELEASES.md`](RELEASES.md)
+planner's integration spec (`openspec/specs/integration/spec.md`); [`RELEASES.md`](RELEASES.md)
 describes what this repo does with it and which settings turn it on.
 
 Who merges what (the owner's decisions of 2026-11-22): ticket PRs into `release/r-n` are merged by
