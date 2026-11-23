@@ -233,7 +233,8 @@ def merge_into_release(cfg: Config, pr_url: str, base: str, head_sha: str, *, me
     """Merge a ticket PR into its release branch. Refuses anything but a release-branch base, so
     this can never merge into main. `--match-head-commit` makes GitHub merge exactly what was tested."""
     from .releases import auto_merge_allowed
-    if not auto_merge_allowed(cfg.release_auto_merge, base):
+    if not auto_merge_allowed(tickets=cfg.release_auto_merge, to_main=cfg.release_merge_to_main,
+                              head=None, base=base, base_branch=cfg.base_branch):
         return False, f"not merged: auto-merge is only for release branches (base {base!r})"
     method = "--merge" if merge_commit else "--squash"
     cp = subprocess.run(["gh", "pr", "merge", pr_url, method, "--match-head-commit", head_sha],
@@ -242,6 +243,33 @@ def merge_into_release(cfg: Config, pr_url: str, base: str, head_sha: str, *, me
     if cp.returncode != 0:
         return False, (cp.stderr or cp.stdout).strip()[-300:]
     return True, ""
+
+
+def merge_release_into_main(cfg: Config, pr_url: str, branch: str, head_sha: str) -> tuple[str, str]:
+    """Merge the release PR (branch -> BASE_BRANCH) with a merge commit, never a squash, so explorer
+    can trace each ticket's merge on UAT. One attempt per call, as (outcome, detail):
+    - "merged": GitHub merged it now;
+    - "queued": main's required checks were not done, so GitHub's auto-merge was turned on and will
+      merge it (with a merge commit) once they pass;
+    - "refused": the gate said no, the head is unknown, or GitHub refused both; the PR stays open
+      for the owner.
+    `--match-head-commit` makes GitHub merge exactly the head that was tested."""
+    from .releases import auto_merge_allowed
+    if not auto_merge_allowed(tickets=cfg.release_auto_merge, to_main=cfg.release_merge_to_main,
+                              head=branch, base=cfg.base_branch, base_branch=cfg.base_branch):
+        return "refused", "RELEASE_MERGE_TO_MAIN is off"
+    if not head_sha:
+        return "refused", f"the head of {branch} is unknown"
+    detail = ""
+    for extra, outcome in (([], "merged"), (["--auto"], "queued")):
+        cp = subprocess.run(["gh", "pr", "merge", pr_url, "--merge", *extra, "--match-head-commit", head_sha],
+                            cwd=cfg.repo_path, capture_output=True, text=True, timeout=300,
+                            env=clean_env("github"))
+        if cp.returncode == 0:
+            return outcome, ""
+        detail = (cp.stderr or cp.stdout).strip()[-300:]
+        log.info("release PR %s: %s merge refused: %s", pr_url, outcome, detail)
+    return "refused", detail
 
 
 def release_prs(cfg: Config, state: str = "all") -> list[dict]:
@@ -259,7 +287,8 @@ def release_prs(cfg: Config, state: str = "all") -> list[dict]:
 
 
 def create_release_pr(cfg: Config, branch: str, title: str, body: str) -> str:
-    """Open release/r-n -> BASE_BRANCH for a human to merge with a merge commit. Returns the URL."""
+    """Open release/r-n -> BASE_BRANCH, to be merged with a merge commit (by a human, or by the
+    pipeline with RELEASE_MERGE_TO_MAIN on). Returns the URL."""
     _ensure_label(cfg, cfg.release_pr_label, "0e8a16", "A release built by claude-pipeline")
     body_file = cfg.repo_path / f".release-pr-{branch.replace('/', '-')}.md"
     body_file.write_text(body)
