@@ -1,10 +1,11 @@
 """Where the dashboard's data comes from. No web framework here, so it is tested on its own.
 
-Four sources, each answered as a `Result` and cached for DASHBOARD_REFRESH_SEC so any number of
+Five sources, each answered as a `Result` and cached for DASHBOARD_REFRESH_SEC so any number of
 open browsers costs one read per source per period:
 - `pipeline`: this repo's ledger (`dashboard.gather_status`, plus each task's timestamps);
 - `board`: the Vikunja board, read with GETs only and grouped by bucket;
-- `planner` / `explorer`: `uv run <cli> status --json` in that checkout, schema 1.
+- `planner` / `explorer`: `uv run <cli> status --json` in that checkout, schema 1;
+- `services`: `systemctl --user show` for each unit in DASHBOARD_UNITS (`services.py`).
 
 A source that fails, times out or is not configured becomes a Result with an error, so one broken
 service never breaks the page.
@@ -27,6 +28,7 @@ from ..db import Ledger
 from ..log import get
 from ..releases import is_tracker, labels_of
 from ..vikunja import Vikunja
+from .services import read_services
 
 log = get("web")
 
@@ -110,9 +112,9 @@ def read_status(name: str, repo_dir: str, *, run=subprocess.run, timeout: int = 
 
 # --- caching --------------------------------------------------------------------------------------
 class Sources:
-    """The four sources behind one TTL cache. The readers are injectable for tests."""
+    """The sources behind one TTL cache. The readers are injectable for tests."""
 
-    NAMES = ("pipeline", "board", "planner", "explorer")
+    NAMES = ("pipeline", "board", "planner", "explorer", "services")
 
     def __init__(self, cfg: Config, *, ttl: float | None = None, clock: Callable[[], float] = time.monotonic,
                  readers: dict[str, Callable[[], dict]] | None = None):
@@ -138,6 +140,7 @@ class Sources:
             if cfg.dashboard_planner_dir else None,
             "explorer": (lambda: read_status("explorer", cfg.dashboard_explorer_dir))
             if cfg.dashboard_explorer_dir else None,
+            "services": (lambda: read_services(list(cfg.dashboard_units))) if cfg.dashboard_units else None,
         }
 
     def get(self, name: str) -> Result:

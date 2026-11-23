@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 
+from .services import needs_attention
 from .sources import Result
 
 OPEN_FINDING_STATES = ("open", "held", "batched", "fix_pending", "fix_merged", "escalated")
@@ -94,6 +95,15 @@ def health(results: dict[str, Result]) -> list[dict]:
             out.append({"service": name, "state": "down" if listener is False else "up",
                         "detail": ("listener not running; " if listener is False else "")
                         + f"{open_n} open investigation(s)"})
+        elif name == "services":
+            if not d.get("available"):
+                out.append({"service": name, "state": "off", "detail": "no systemd on this host"})
+                continue
+            units = d.get("units") or []
+            up = sum(1 for u in units if u["active"] == "active")
+            bad = [u for u in units if needs_attention(u)]
+            out.append({"service": name, "state": "down" if bad else "up",
+                        "detail": f"{up} of {len(units)} units active"})
         elif name == "explorer":
             run = d.get("active_run")
             uat = d.get("uat") or {}
@@ -131,6 +141,11 @@ def alerts(results: dict[str, Result], now: dt.datetime | None = None) -> list[A
     pl = results["planner"].data if results["planner"].ok else None
     if pl and (pl.get("listener") or {}).get("running") is False:
         out.append(Alert("bad", "planner", "the Slack listener is not running", "planner"))
+    sv = results["services"].data if "services" in results and results["services"].ok else None
+    for u in (sv or {}).get("units") or []:
+        why = needs_attention(u)
+        if why:
+            out.append(Alert("bad", "services", f"{u['unit']} {why}", "services"))
     ex = results["explorer"].data if results["explorer"].ok else None
     if ex:
         uat = ex.get("uat") or {}
