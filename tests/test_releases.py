@@ -93,7 +93,14 @@ def test_merge_into_release_never_calls_gh_for_main(tmp_path, monkeypatch):
     ok, msg = prmod.merge_into_release(cfg, "https://gh/pr/1", "main", "abc", merge_commit=False)
     assert not ok and "only for release branches" in msg and calls == []
     ok, _ = prmod.merge_into_release(cfg, "https://gh/pr/1", "release/r-4", "abc", merge_commit=False)
-    assert ok and calls[-1][:5] == ["gh", "pr", "merge", "https://gh/pr/1", "--squash"]
+    assert ok and calls[-1][:5] == ["gh", "pr", "merge", "https://gh/pr/1", "--merge"]   # the default
+    sq = _cfg(tmp_path, RELEASE_AUTO_MERGE="true", RELEASE_TICKET_MERGE_METHOD="squash")
+    prmod.merge_into_release(sq, "https://gh/pr/1", "release/r-4", "abc", merge_commit=False)
+    assert calls[-1][4] == "--squash"
+    bad = _cfg(tmp_path, RELEASE_AUTO_MERGE="true", RELEASE_TICKET_MERGE_METHOD="fast-forward")
+    assert bad.release_ticket_merge_method == "merge"
+    prmod.merge_into_release(sq, "https://gh/pr/2", "release/r-4", "abc", merge_commit=True)
+    assert calls[-1][4] == "--merge"                                   # a repair: always a merge commit
     prmod.merge_into_release(cfg, "https://gh/pr/2", "release/r-4", "abc", merge_commit=True)
     assert "--merge" in calls[-1] and "--match-head-commit" in calls[-1]
     off = _cfg(tmp_path, RELEASE_AUTO_MERGE="false")
