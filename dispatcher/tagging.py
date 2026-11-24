@@ -144,15 +144,17 @@ class Tagger:
         cp = self._git(*args)
         return cp.stdout.split() if cp.returncode == 0 else []
 
-    def _statuses(self, sha: str) -> list[dict] | None:
+    def _statuses(self, sha: str) -> tuple[list[dict] | None, str]:
+        """The commit's statuses, or None and why (gh's own message, so a token without the
+        commit-statuses permission says so)."""
         cp = self._gh("api", f"repos/{{owner}}/{{repo}}/commits/{sha}/statuses?per_page=100")
         if cp.returncode != 0:
-            return None
+            return None, (cp.stderr or cp.stdout or "").strip()[:300]
         try:
             rows = json.loads(cp.stdout or "[]")
         except json.JSONDecodeError:
-            return None
-        return rows if isinstance(rows, list) else None
+            return None, "gh returned something that is not JSON"
+        return (rows, "") if isinstance(rows, list) else (None, "gh returned something that is not a list")
 
     def _tag_exists(self, name: str) -> bool:
         return self._git("rev-parse", "--verify", "--quiet", f"refs/tags/{name}").returncode == 0
@@ -181,9 +183,9 @@ class Tagger:
         commits = self._range(previous)
         chosen, batches = "", []
         for sha in commits:                                  # newest first
-            rows = self._statuses(sha)
+            rows, why = self._statuses(sha)
             if rows is None:
-                return None, f"could not read the statuses of {sha[:9]}"
+                return None, f"could not read the statuses of {sha[:9]}: {why}"
             found = settled_batches(rows)
             if found:
                 chosen = chosen or sha
