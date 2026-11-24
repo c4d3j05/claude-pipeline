@@ -105,7 +105,7 @@ def test_processes_come_from_the_units_cgroup(tmp_path):
     (cg / "sub").mkdir(parents=True)
     (cg / "cgroup.procs").write_text("11\n12\n")
     (cg / "sub" / "cgroup.procs").write_text("13\n")
-    for pid, args in ((11, b"uv\0run\0claude-pipeline\0run"), (13, b"python\0manage.py\0test\0" + b"x" * 300)):
+    for pid, args in ((11, b"uv\0run\0claude-pipeline\0run"), (13, b"python\0manage.py\0test\0" + b"x" * (svc.MAX_ARGS + 100))):
         (tmp_path / "proc" / str(pid)).mkdir(parents=True)
         (tmp_path / "proc" / str(pid) / "cmdline").write_bytes(args)
     procs = svc.processes("/app.slice/x.service", root=tmp_path / "cg", proc=tmp_path / "proc")

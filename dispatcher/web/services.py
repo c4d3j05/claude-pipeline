@@ -19,7 +19,7 @@ PROPS = ("Id", "Description", "LoadState", "ActiveState", "SubState", "UnitFileS
          "NRestarts", "ControlGroup", "LastTriggerUSec", "NextElapseUSecRealtime")
 SHOW_TIMEOUT_SEC = 10
 MAX_PROCESSES = 12
-MAX_ARGS = 200
+MAX_ARGS = 4000
 UNSET = ("", "[not set]", "n/a", "0", "infinity", "18446744073709551615")
 
 

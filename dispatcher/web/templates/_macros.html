@@ -21,6 +21,10 @@
   <span class="badge s-{{ (state or 'unknown')|lower|replace(' ', '_') }}">{{ state or '?' }}</span>
 {%- endmacro %}
 
+{% macro more(text) -%}
+  {% if text %}<details class="more"><summary title="click to show it all; click again to fold">{{ text }}</summary></details>{% endif %}
+{%- endmacro %}
+
 {% macro link(url, text) -%}
   {% if url|url %}<a href="{{ url|url }}" target="_blank" rel="noopener">{{ text }}</a>{% else %}{{ text }}{% endif %}
 {%- endmacro %}

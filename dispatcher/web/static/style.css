@@ -50,6 +50,10 @@ td { padding: .5rem; border-bottom: 1px solid var(--line); vertical-align: top; 
 tr:last-child td { border-bottom: 0; }
 .card:has(table) { overflow-x: auto; }
 .clip { max-width: 32rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wide { max-width: 32rem; }
+.more summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; list-style: none; }
+.more summary::-webkit-details-marker { display: none; }
+.more[open] summary { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .75rem;
   font-weight: 600; background: var(--chip); color: var(--muted); white-space: nowrap; }
@@ -90,7 +94,7 @@ tr:last-child td { border-bottom: 0; }
 @media (max-width: 640px) {
   main { padding: .75rem; }
   .stat .big { font-size: 1.3rem; }
-  .clip { max-width: 14rem; }
+  .clip, .wide { max-width: 14rem; }
 }
 
 /* services tab */

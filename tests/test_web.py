@@ -271,7 +271,7 @@ def test_every_tab_is_a_shell_that_htmx_refreshes(cfg, path):
     r = client(cfg).get(path)
     tab = path.strip("/") or "overview"
     assert r.status_code == 200
-    assert f'hx-get="/section/{tab}"' in r.text and 'hx-trigger="load, every 15s"' in r.text
+    assert f'hx-get="/section/{tab}"' in r.text and 'hx-trigger="load, every 15s [!document.querySelector(\'#section details[open]\')]"' in r.text
     assert "/static/htmx.min.js" in r.text
 
 
@@ -325,3 +325,12 @@ def test_cli_has_a_web_command(monkeypatch, tmp_path):
     env.write_text("DASHBOARD_PORT=8123\n")
     assert cli.main(["--env", str(env), "web"]) == 0
     assert seen["port"] == 8123
+
+
+def test_long_activity_is_shown_whole_in_a_fold_and_the_terminal_cuts_it(cfg):
+    from dispatcher import dashboard
+    long = "The earlier gate run was killed by my own 590-second `timeout`, not a test failure; " + "x" * 200
+    task = {**PIPELINE["tasks"][0], "activity": long}
+    r = client(cfg, pipeline=lambda: {**PIPELINE, "tasks": [task]}).get("/section/pipeline")
+    assert '<details class="more"><summary' in r.text and "x" * 200 in r.text
+    assert dashboard._short(long).endswith("…") and len(dashboard._short(long)) == dashboard.SHORT

@@ -15,6 +15,7 @@ from textual.widgets import Button, DataTable, Footer, Input, Label, Static
 from . import dashboard as dash
 from . import detail as detailmod
 from .config import Config
+from .dashboard import _short
 from .db import Ledger
 
 _STATE_COLOR = {
@@ -169,7 +170,7 @@ class DashboardApp(App):
                 f"${t['cost']:.2f}",
                 t["retries"],
                 pr,
-                t["activity"],
+                _short(t["activity"]),
             )
             self._row_ids.append(t["task_id"])
         if self._row_ids:
