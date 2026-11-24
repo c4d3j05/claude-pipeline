@@ -133,6 +133,13 @@ class Config:
     # run inside the release workspace; empty = none.
     release_check_cmd: str = ""
 
+    # Release tags (integration D17): tag the target repo on the commit explorer marks
+    # `explorer/batch-settled`. Off: nothing is ever tagged.
+    release_tags: bool = False
+    tag_prefix: str = "v"
+    tag_scan_commits: int = 30         # first-parent commits read when no tag exists yet
+    tag_poll_min: int = 10
+
     # Web dashboard (`claude-pipeline web`): read-only, no login, so bind it to a trusted network.
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8090
@@ -147,6 +154,7 @@ class Config:
         "MAX_WORKERS", "POLL_INTERVAL", "DAILY_CAP_USD", "TASK_CAP_USD",
         "WORKER_MODEL", "REVIEW_MODEL", "PERMISSION_MODE",
         "MAX_TURNS", "WALL_CLOCK_LIMIT_MIN", "MAX_TEST_RETRIES", "MAX_REVIEW_RETRIES",
+        "RELEASE_TAGS",
     )
 
     @property
@@ -206,6 +214,10 @@ def load(env_file: str | None = ".env") -> Config:
         release_merge_to_main=_str(src, "RELEASE_MERGE_TO_MAIN", "false").lower() in ("1", "true", "yes", "on"),
         release_pr_label=_str(src, "RELEASE_PR_LABEL", "claude-release"),
         release_check_cmd=_str(src, "RELEASE_CHECK_CMD"),
+        release_tags=_str(src, "RELEASE_TAGS", "false").lower() in ("1", "true", "yes", "on"),
+        tag_prefix=_str(src, "TAG_PREFIX", "v"),
+        tag_scan_commits=max(1, _int(src, "TAG_SCAN_COMMITS", 30)),
+        tag_poll_min=max(1, _int(src, "TAG_POLL_MIN", 10)),
         dashboard_host=_str(src, "DASHBOARD_HOST", "127.0.0.1"),
         dashboard_port=_int(src, "DASHBOARD_PORT", 8090),
         dashboard_planner_dir=_str(src, "DASHBOARD_PLANNER_DIR"),

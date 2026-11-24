@@ -224,6 +224,22 @@ def cmd_prepare_repo(args) -> int:
     return 0
 
 
+def cmd_tag(args) -> int:
+    """One release-tag pass now (D17); --dry-run prints what it would tag and writes nothing."""
+    from . import tagging
+    from .db import Ledger
+
+    cfg = _load(args.env)
+    if not cfg.release_tags and not args.dry_run:
+        print("RELEASE_TAGS is off; set RELEASE_TAGS=true in .env, or use --dry-run", file=sys.stderr)
+        return 2
+    slack = None if args.dry_run else Slack(cfg.slack_webhook)
+    ledger = None if args.dry_run else Ledger(cfg.db_path)
+    out = tagging.Tagger(cfg, slack=slack, ledger=ledger).run_pass(dry_run=args.dry_run)
+    print(tagging.describe(out))
+    return 1 if out.error else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="claude-pipeline")
     p.add_argument("--env", default=".env", help="path to env file (default: .env)")
@@ -242,6 +258,9 @@ def main(argv: list[str] | None = None) -> int:
                       help="with --once: only show tasks in this state group")
     dash.set_defaults(func=cmd_dashboard)
     sub.add_parser("web", help="read-only web dashboard (DASHBOARD_HOST:DASHBOARD_PORT)").set_defaults(func=cmd_web)
+    tg = sub.add_parser("tag", help="tag the newest settled commit now (RELEASE_TAGS, integration D17)")
+    tg.add_argument("--dry-run", action="store_true", help="print what would be tagged; change nothing")
+    tg.set_defaults(func=cmd_tag)
     pr = sub.add_parser("prepare-repo", help="install worker-settings.json + CLAUDE.md into target repo")
     pr.add_argument("--force", action="store_true", help="overwrite an existing CLAUDE.md")
     pr.set_defaults(func=cmd_prepare_repo)

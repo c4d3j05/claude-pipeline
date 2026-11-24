@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import config as cfgmod
-from . import infra, releases, slackthread, touches
+from . import infra, releases, slackthread, tagging, touches
 from . import pr as prmod
 from .cleanup import process_closed_prs, sync_deleted_tasks, watch_open_prs
 from .config import Config
@@ -120,6 +120,9 @@ class Dispatcher:
         self._release_pass_running = threading.Event()
         self._repair_logged: dict[int, str] = {}           # task -> release it waits for
         self._mismatch_said: dict[str, str] = {}           # release -> mismatch already alerted
+        self.tagger = tagging.Tagger(cfg, slack=self.slack, ledger=self.ledger)
+        self._last_tag_pass = float("-inf")
+        self._tag_pass_running = threading.Event()
 
     # --- bucket / label resolution --------------------------------------
     def refresh_board(self) -> None:
@@ -248,6 +251,8 @@ class Dispatcher:
             if not self._release_pass_running.is_set():
                 self._release_pass_running.set()
                 self.pool.submit(self._safe_release_pass)
+
+        self._maybe_tag(now)
 
         # Operator pause (from the dashboard): keep running workers, stop claiming.
         if self.ledger.is_paused():
@@ -988,6 +993,25 @@ class Dispatcher:
         else:
             self.comment(tid, f"auto-merge into {target.branch} failed: {msg}; merge it by hand ({pr_url})")
             self.slack.pr_needs_attention(tid, f"auto-merge failed: {msg}", pr_url)
+
+    def _maybe_tag(self, now: float) -> None:
+        """Release tags (D17): one pass at most every TAG_POLL_MIN while RELEASE_TAGS is on."""
+        if not self.cfg.release_tags or self._tag_pass_running.is_set():
+            return
+        if now - self._last_tag_pass < self.cfg.tag_poll_min * 60:
+            return
+        self._last_tag_pass = now
+        self._tag_pass_running.set()
+        self.tagger.cfg = self.cfg                      # hot-reloaded settings
+        self.pool.submit(self._safe_tag_pass)
+
+    def _safe_tag_pass(self) -> None:
+        try:
+            self.tagger.run_pass()
+        except Exception:
+            log.exception("release tag pass failed")
+        finally:
+            self._tag_pass_running.clear()
 
     def _safe_release_pass(self) -> None:
         try:
