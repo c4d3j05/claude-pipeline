@@ -1,4 +1,4 @@
-{% from "_macros.html" import unavailable, badge, link %}
+{% from "_macros.html" import unavailable, badge, link, more %}
 {% if not res.ok %}{{ unavailable(res) }}{% else %}
 {% set d = res.data %}
 {% set listener = (d.listener or {}) %}
@@ -19,7 +19,7 @@
     {% for i in d.investigations %}
     <tr><td class="mono">{{ link(i.thread_permalink, i.id) }}</td><td>{{ badge(i.state) }}</td>
         <td>{{ i.source or '-' }}{% if i.batch_id %} <span class="label">{{ i.batch_id }}</span>{% endif %}</td>
-        <td class="clip">{{ i.title or i.flow or '' }}</td>
+        <td class="wide">{{ more(i.title or i.flow or '') }}</td>
         <td class="mono">{{ i.spent_usd|money }} / {{ i.cap_usd|money }}</td><td class="muted small">{{ (i.updated or i.created)|ago }}</td></tr>
     {% endfor %}
     </tbody>

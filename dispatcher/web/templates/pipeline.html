@@ -1,4 +1,4 @@
-{% from "_macros.html" import unavailable, badge, link %}
+{% from "_macros.html" import unavailable, badge, link, more %}
 {% if not res.ok %}{{ unavailable(res) }}{% else %}
 {% set d = res.data %}
 {% set active = d.tasks|selectattr('state', 'in', ['claimed', 'working', 'testing', 'reviewing'])|list %}
@@ -17,7 +17,7 @@
     {% for t in active %}
     <tr><td>{{ link(t.url, '#' ~ t.task_id) }} <span class="muted small">{{ t.slug }}</span></td><td>{{ badge(t.state) }}</td>
         <td class="mono">{{ t.elapsed }}</td><td class="mono">{{ t.cost|money }}</td><td class="mono">{{ t.retries }}</td>
-        <td class="clip">{{ t.activity }}</td></tr>
+        <td class="wide">{{ more(t.activity) }}</td></tr>
     {% endfor %}
     </tbody>
   </table>

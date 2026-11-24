@@ -1,4 +1,4 @@
-{% from "_macros.html" import unavailable, badge %}
+{% from "_macros.html" import unavailable, badge, more %}
 {% if not res.ok %}{{ unavailable(res) }}{% else %}
 {% set d = res.data %}
 {% if not d.available %}
@@ -24,7 +24,7 @@
     {% if u.processes %}
     <tr><td colspan="7">
       <div class="muted small">running now</div>
-      <ul class="proc mono small">{% for p in u.processes %}<li><span class="muted">{{ p.pid }}</span> {{ p.args }}</li>{% endfor %}</ul>
+      <ul class="proc mono small">{% for p in u.processes %}<li><span class="muted">{{ p.pid }}</span> {{ more(p.args) }}</li>{% endfor %}</ul>
     </td></tr>
     {% endif %}
     {% endfor %}

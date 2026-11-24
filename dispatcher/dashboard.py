@@ -58,6 +58,10 @@ def _elapsed(started_at: str | None) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+ACTIVITY_MAX = 4000      # the web dashboard shows it whole; the terminal views cut it to SHORT
+SHORT = 80
+
+
 def _last_message(logs_root: Path, slug: str) -> str:
     path = logs_root / slug / "session.jsonl"
     if not path.exists():
@@ -78,7 +82,11 @@ def _last_message(logs_root: Path, slug: str) -> str:
                     last = b["text"].strip().replace("\n", " ")
         elif ev.get("type") == "result" and ev.get("result"):
             last = "✓ " + str(ev["result"]).strip().replace("\n", " ")
-    return last[:80]
+    return last[:ACTIVITY_MAX]
+
+
+def _short(text: str) -> str:
+    return text if len(text) <= SHORT else text[:SHORT - 1] + "…"
 
 
 def gather_status(cfg: Config, ledger: Ledger, logs_root: Path = Path("logs")) -> dict:
@@ -129,7 +137,7 @@ def snapshot_text(cfg: Config, ledger: Ledger, logs_root: Path = Path("logs"),
         pr = t["pr_url"].rsplit("/", 1)[-1] if t["pr_url"] else ""
         lines.append(
             f"{t['task_id']:>5}  {t['state']:<10} {t['elapsed']:>8}  ${t['cost']:>5.2f}  "
-            f"r{t['retries']:<5} {('#'+pr) if pr else '':<6} {t['activity']}"
+            f"r{t['retries']:<5} {('#'+pr) if pr else '':<6} {_short(t['activity'])}"
         )
     return "\n".join(lines)
 

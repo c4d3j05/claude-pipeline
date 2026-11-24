@@ -18,10 +18,10 @@
   </header>
   <main id="section"
         hx-get="/section/{{ tab }}{{ query }}"
-        hx-trigger="load, every {{ refresh }}s"
+        hx-trigger="load, every {{ refresh }}s [!document.querySelector('#section details[open]')]"
         hx-swap="innerHTML">
     <p class="muted loading">Loading…</p>
   </main>
-  <footer class="muted">Refreshes every {{ refresh }} s · nothing on this page changes anything</footer>
+  <footer class="muted">Refreshes every {{ refresh }} s (paused while a row is expanded) · nothing on this page changes anything</footer>
 </body>
 </html>
