@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS control (
     paused INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO control (id, paused) VALUES (1, 0);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,                -- e.g. tag_alert:<sha> (release tags, alerted once)
+    value TEXT NOT NULL
+);
 """
 
 ACTIVE_STATES = ("claimed", "working", "testing", "reviewing")
@@ -228,6 +233,18 @@ class Ledger:
     def set_paused(self, paused: bool) -> None:
         with self._lock:
             self.conn.execute("UPDATE control SET paused=? WHERE id=1", (1 if paused else 0,))
+            self.conn.commit()
+
+    # --- meta (small flags that must survive a restart) -----------------
+    def get_meta(self, key: str) -> str | None:
+        with self._lock:
+            row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            self.conn.execute("INSERT INTO meta (key, value) VALUES (?, ?) "
+                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
             self.conn.commit()
 
     def request_cancel(self, task_id: int) -> None:

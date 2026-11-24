@@ -129,6 +129,7 @@ test run beyond removing credentials from it.
 | `prepare-repo` | Drop `worker-settings.json` + `CLAUDE.md` template into `TARGET_REPO_PATH`. |
 | `dashboard` | Terminal control panel: live worker status + edit config + pause/retry/cancel (`--once` for a one-shot text snapshot). |
 | `web` | Read-only web dashboard for the whole factory: pipeline, the Vikunja board, claude-planner and explorer. |
+| `tag` | One release-tag pass now (`RELEASE_TAGS`); `--dry-run` prints the tag, commit, batches and notes it would create. |
 
 ## Dashboard
 
@@ -207,6 +208,21 @@ the pipeline with `RELEASE_AUTO_MERGE=true`; the release PR into `main` is merge
 with a merge commit, with `RELEASE_MERGE_TO_MAIN=true`. A release is then verified by explorer on
 UAT after it merges. A ticket PR into `main` (a DM ticket, a hotfix) is always a human's to merge.
 
+## Release tags
+
+With `RELEASE_TAGS=true` the target repo is tagged once a batch is settled: when explorer has
+verified on UAT that every finding of a batch is resolved or dismissed, it marks that commit with
+the commit status `explorer/batch-settled`. At most every `TAG_POLL_MIN` the dispatcher reads the
+statuses of the base branch's first-parent commits since the last `TAG_PREFIX` tag, and on the
+newest settled one creates an annotated tag named after the local date (`v2026.11.24`, `.2` for a
+second the same day), pushes it, creates a GitHub Release (the settled batches, then every PR merged
+since the previous tag) and posts one line in Slack. A failure is alerted once and retried.
+
+A tag is never moved or deleted, and only commits on the first-parent history of the base branch
+are tagged. So `v*` tags exist only on verified, settled commits, and a production deploy can
+follow tags later. `claude-pipeline tag --dry-run` shows what the next pass would do. The contract
+is D17 in planner's integration spec.
+
 ## Status write-back
 
 | Event | Bucket | Comment |
@@ -233,6 +249,7 @@ dispatcher/        the daemon (poll, claim, prompt, worker, gate, review, PR, cl
   review.py        the gate: independent tests + adversarial review session
   pr.py            git push + `gh pr create` + PR body assembly + release merges and PRs
   releases.py      release branches: Release lines, sync with main, repairs, the auto-merge guard
+  tagging.py       release tags on commits explorer marks `explorer/batch-settled` (D17)
   cleanup.py       PR-close teardown + nightly maintenance
   daemon.py        the main loop and per-task pipeline
   dashboard.py     terminal dashboard data + controls (gather_status)
