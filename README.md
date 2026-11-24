@@ -210,16 +210,18 @@ UAT after it merges. A ticket PR into `main` (a DM ticket, a hotfix) is always a
 
 ## Release tags
 
-With `RELEASE_TAGS=true` the target repo is tagged once a batch is settled: when explorer has
-verified on UAT that every finding of a batch is resolved or dismissed, it marks that commit with
-the commit status `explorer/batch-settled`. At most every `TAG_POLL_MIN` the dispatcher reads the
+With `RELEASE_TAGS=true` the target repo is tagged once a batch is settled and checked: when every
+finding of a batch is resolved or dismissed, explorer runs a release check on that UAT commit (every
+promoted script, the permission probe, the state probes) and marks the commit with the commit status
+`explorer/batch-settled`: `success` only when the check passed, `failure` otherwise. Only the
+latest status per commit counts, and a `failure` is never tagged. At most every `TAG_POLL_MIN` the dispatcher reads the
 statuses of the base branch's first-parent commits since the last `TAG_PREFIX` tag, and on the
 newest settled one creates an annotated tag named after the local date (`v2026.11.24`, `.2` for a
 second the same day), pushes it, creates a GitHub Release (the settled batches, then every PR merged
 since the previous tag) and posts one line in Slack. A failure is alerted once and retried.
 
 A tag is never moved or deleted, and only commits on the first-parent history of the base branch
-are tagged. So `v*` tags exist only on verified, settled commits, and a production deploy can
+are tagged. So `v*` tags exist only on settled commits whose release check passed, and a production deploy can
 follow tags later. `claude-pipeline tag --dry-run` shows what the next pass would do. The contract
 is D17 in planner's integration spec.
 
