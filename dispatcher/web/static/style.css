@@ -51,7 +51,8 @@ tr:last-child td { border-bottom: 0; }
 .card:has(table) { overflow-x: auto; }
 .clip { max-width: 32rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wide { max-width: 32rem; }
-.more summary { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; list-style: none; }
+/* a table cell grows to its content whatever its max-width, so the cap sits on the summary */
+.more summary { display: block; max-width: 32rem; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; list-style: none; }
 .more summary::-webkit-details-marker { display: none; }
 .more[open] summary { white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -94,7 +95,7 @@ tr:last-child td { border-bottom: 0; }
 @media (max-width: 640px) {
   main { padding: .75rem; }
   .stat .big { font-size: 1.3rem; }
-  .clip, .wide { max-width: 14rem; }
+  .clip, .wide, .more summary { max-width: 14rem; }
 }
 
 /* services tab */
