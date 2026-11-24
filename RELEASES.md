@@ -37,7 +37,8 @@ update.
 4. **The PR** targets `release/r-n`.
 5. **With `RELEASE_AUTO_MERGE=true`**, once the tests and review pass: if the release moved since the
    ticket branched, the release head is merged into the ticket's branch and the tests run again; then
-   `gh pr merge --squash --match-head-commit <tested sha>`. A repair is merged with `--merge`, so main
+   `gh pr merge --<RELEASE_TICKET_MERGE_METHOD> --match-head-commit <tested sha>` (a merge commit by
+   default; it must be a method the repository allows). A repair is always merged with `--merge`, so main
    stays recorded as merged and the next sync has nothing to redo. A conflict, a red gate or a refused
    merge leaves the PR open and posts "needs attention". `auto_merge_allowed()` in `releases.py` is
    the only gate for every merge the pipeline makes (see "Who may merge" below).
@@ -73,6 +74,7 @@ next merged into the release branch. A release ticket still waits for main work 
 | Setting | Default | Meaning |
 |---|---|---|
 | `RELEASE_AUTO_MERGE` | `false` | Merge a release ticket's PR into its release branch once its gates pass. |
+| `RELEASE_TICKET_MERGE_METHOD` | `merge` | How that merge is done: `merge` (a merge commit), `squash` or `rebase`. A refused merge is logged and posts "needs attention". |
 | `RELEASE_MERGE_TO_MAIN` | `false` | Merge the release PR into main, with a merge commit, once every ticket is done and the release head is green. |
 | `RELEASE_PR_LABEL` | `claude-release` | Label of the release -> main PRs. |
 | `RELEASE_CHECK_CMD` | (empty) | Extra check on a release head after the tests, run in its workspace, e.g. `cd backend && poetry run python manage.py makemigrations --check --dry-run`. Django's test run already fails on conflicting migrations. |

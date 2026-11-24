@@ -236,12 +236,15 @@ def merge_into_release(cfg: Config, pr_url: str, base: str, head_sha: str, *, me
     if not auto_merge_allowed(tickets=cfg.release_auto_merge, to_main=cfg.release_merge_to_main,
                               head=None, base=base, base_branch=cfg.base_branch):
         return False, f"not merged: auto-merge is only for release branches (base {base!r})"
-    method = "--merge" if merge_commit else "--squash"
+    method = "--merge" if merge_commit else f"--{cfg.release_ticket_merge_method}"
     cp = subprocess.run(["gh", "pr", "merge", pr_url, method, "--match-head-commit", head_sha],
                         cwd=cfg.repo_path, capture_output=True, text=True, timeout=300,
                         env=clean_env("github"))
     if cp.returncode != 0:
-        return False, (cp.stderr or cp.stdout).strip()[-300:]
+        why = (cp.stderr or cp.stdout).strip()[-300:]
+        log.warning("merge of %s into %s (%s) refused: %s", pr_url, base, method, why)
+        return False, why
+    log.info("merged %s into %s (%s)", pr_url, base, method)
     return True, ""
 
 

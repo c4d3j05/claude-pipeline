@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Every service of the three repos on the host, as installed by their scripts/install.sh.
+MERGE_METHODS = ("merge", "squash", "rebase")
 DEFAULT_DASHBOARD_UNITS = ("claude-pipeline-dispatcher", "claude-pipeline-nightly.timer", "claude-pipeline-web",
                            "claude-planner", "explorer-serve", "explorer-nightly.timer")
 
@@ -125,6 +126,9 @@ class Config:
     # The pipeline merges a ticket PR into a release branch itself only when this is on. A ticket
     # PR into main is never merged by the pipeline, whatever these say.
     release_auto_merge: bool = False
+    # How the pipeline merges a ticket PR into its release branch: merge (a merge commit, the
+    # default: many repos allow only that), squash or rebase. A repair ticket always uses merge.
+    release_ticket_merge_method: str = "merge"
     # Merge the release PR (release/r-n -> main) itself, with a merge commit, once every ticket is
     # done and the release head is green. Off: the release PR waits for a human.
     release_merge_to_main: bool = False
@@ -211,6 +215,9 @@ def load(env_file: str | None = ".env") -> Config:
                         if p.strip()),
         db_name_template=_str(src, "DB_NAME_TEMPLATE", "app_{slug}"),
         release_auto_merge=_str(src, "RELEASE_AUTO_MERGE", "false").lower() in ("1", "true", "yes", "on"),
+        release_ticket_merge_method=(_str(src, "RELEASE_TICKET_MERGE_METHOD", "merge").lower()
+                                     if _str(src, "RELEASE_TICKET_MERGE_METHOD", "merge").lower()
+                                     in MERGE_METHODS else "merge"),
         release_merge_to_main=_str(src, "RELEASE_MERGE_TO_MAIN", "false").lower() in ("1", "true", "yes", "on"),
         release_pr_label=_str(src, "RELEASE_PR_LABEL", "claude-release"),
         release_check_cmd=_str(src, "RELEASE_CHECK_CMD"),
