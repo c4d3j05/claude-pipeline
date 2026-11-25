@@ -21,23 +21,23 @@ in unrelated tests (`tests/test_gaps.py`); rerun once before treating a failure 
       contains the line `Batch: B-1`. This is the only test of the wiring, so do not skip it.
 
 ## 2. Tagging
-- [ ] 2.1 `tests/test_tagging.py`: extend `FakeRepo` so the existing tests keep passing once `plan()` lists
+- [x] 2.1 `tests/test_tagging.py`: extend `FakeRepo` so the existing tests keep passing once `plan()` lists
       release PRs: a constructor argument `prs=()` (list of dicts with `number`, `headRefName`,
       `mergeCommit: {"oid": sha}`, `body`) and, in `__call__`, for `tool == "gh"` and `rest[:2] == ["pr", "list"]`
       return `ok(json.dumps(list(self.prs)))`. `"pr list"` in `fail` must make it fail like other calls.
       Also let `_status(...)` take `lane=""` and build the context `tg.CONTEXT + "/" + lane` when set.
-- [ ] 2.2 `dispatcher/tagging.py`: add `LANE_RE = re.compile(r"^[a-z][a-z0-9-]{0,39}$")` and
+- [x] 2.2 `dispatcher/tagging.py`: add `LANE_RE = re.compile(r"^[a-z][a-z0-9-]{0,39}$")` and
       `settled_on(statuses)` as in design.md ("Reading"). Leave `settled_batches` untouched.
       Test `test_settled_on_reads_every_lane_context_latest_first`: the example in design.md gives
       `{"B-4": "billing", "B-1": ""}`; a context `explorer/batch-settled/Bad_Lane` is ignored; two statuses of
       the same lane context with the newer one `failure` give nothing for that context.
       Test `test_one_batch_under_several_contexts_failure_wins`: the four rows of the table in design.md
       ("One batch under several contexts"), asserting each result exactly.
-- [ ] 2.3 `Tagger._release_prs()` as in design.md (`plan()` does not call it yet; that is 2.5).
+- [x] 2.3 `Tagger._release_prs()` as in design.md (`plan()` does not call it yet; that is 2.5).
       Test `test_release_prs_are_read_through_gh`: with `FakeRepo(prs=[R6])`, `Tagger._release_prs()` returns
       `([R6], "")` and `repo.calls` contains a `gh pr list` call with `--state merged`; with
       `FakeRepo(fail=("pr list",))` it returns `(None, <text starting "could not list the release PRs">)`.
-- [ ] 2.4 `Plan.lanes`, `Outcome.blockers`, `label()`, and the three message formats in design.md ("Shapes").
+- [x] 2.4 `Plan.lanes`, `Outcome.blockers`, `label()`, and the three message formats in design.md ("Shapes").
       `_set_pending` stores `lanes`; `_pending` reads `d.get("lanes") or {}`.
       Test `test_an_old_pending_plan_without_lanes_still_loads`: put
       `{"name": "v2026.11.24", "sha": A, "batches": ["B-1"], "previous": "", "notes": "n"}` in the ledger

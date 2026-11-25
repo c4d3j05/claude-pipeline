@@ -16,19 +16,22 @@ DAY = dt.date(2026, 11, 24)
 A, B, C = "a" * 40, "b" * 40, "c" * 40          # first-parent commits, newest first
 
 
-def _status(state="success", desc="B-1 settled: 3 findings", context=tg.CONTEXT):
+def _status(state="success", desc="B-1 settled: 3 findings", context=tg.CONTEXT, lane=""):
+    if lane:
+        context = f"{tg.CONTEXT}/{lane}"
     return {"context": context, "state": state, "description": desc}
 
 
 class FakeRepo:
     """Answers the git and gh calls tagging makes; records every call."""
 
-    def __init__(self, *, tags=None, commits=(A, B, C), statuses=None, fail=(), log=None):
+    def __init__(self, *, tags=None, commits=(A, B, C), statuses=None, fail=(), log=None, prs=()):
         self.tags = dict(tags or {})                 # name -> sha (local, after fetch)
         self.pushed = set(self.tags)
         self.releases: dict[str, str] = {}
         self.commits, self.statuses = list(commits), statuses or {}
         self.fail, self.log = set(fail), log or {}
+        self.prs = list(prs)                         # merged release PRs `gh pr list` returns
         self.calls: list[list[str]] = []
 
     def __call__(self, args, **kw):
@@ -66,6 +69,8 @@ class FakeRepo:
                 self.pushed.add(rest[-1].removeprefix("refs/tags/"))
                 return ok()
         if tool == "gh":
+            if rest[:2] == ["pr", "list"]:
+                return ok(json.dumps(list(self.prs)))
             if rest[0] == "api":
                 sha = rest[1].split("/commits/")[1].split("/")[0]
                 return ok(json.dumps(self.statuses.get(sha, [])))
@@ -216,3 +221,46 @@ def test_a_failed_push_is_retried_with_the_same_tag_and_no_release_yet(tmp_path)
     second = t.run_pass()
     assert second.tagged and second.plan.name == "v2026.11.24" and "v2026.11.24" in repo.pushed
     assert not ledger.get_meta(tg.PENDING_KEY) and len(slack.alerts) == 1 and len(slack.posts) == 1
+
+
+# --- lane contexts (change lane-tags) -------------------------------------------------------------
+R6 = {"number": 650, "headRefName": "release/r-6", "mergeCommit": {"oid": B}, "body": "Batch: B-6\n"}
+
+
+def test_settled_on_reads_every_lane_context_latest_first():
+    statuses = [_status(desc="B-4 settled; check passed: 5/5 scripts", lane="billing"),
+                _status(state="failure", desc="B-6 settled; check failed: 1 script", lane="portal"),
+                _status(desc="B-1 settled: 3 findings"),
+                _status(context="ci/test", desc="ok")]
+    assert tg.settled_on(statuses) == {"B-4": "billing", "B-1": ""}
+    assert tg.settled_on([_status(desc="B-2 settled", context="explorer/batch-settled/Bad_Lane")]) == {}
+    newer_failure = [_status(state="failure", desc="B-4 settled", lane="billing"),
+                     _status(desc="B-4 settled", lane="billing")]
+    assert tg.settled_on(newer_failure) == {}
+
+
+def test_one_batch_under_several_contexts_failure_wins():
+    def row(*pairs):
+        return tg.settled_on([_status(state=st, desc="B-4 settled", lane=lane) for st, lane in pairs])
+    assert row(("success", ""), ("success", "billing")) == {"B-4": "billing"}
+    assert row(("failure", ""), ("success", "billing")) == {}
+    assert row(("success", "portal"), ("success", "billing")) == {"B-4": "billing"}
+    assert row(("pending", "billing"), ("success", "")) == {"B-4": ""}
+
+
+def test_release_prs_are_read_through_gh(tmp_path):
+    repo = FakeRepo(prs=[R6])
+    assert _tagger(tmp_path, repo)._release_prs() == ([R6], "")
+    call = next(c for c in repo.calls if c[:3] == ["gh", "pr", "list"])
+    assert "--state" in call and call[call.index("--state") + 1] == "merged"
+    got, why = _tagger(tmp_path, FakeRepo(fail=("pr list",)))._release_prs()
+    assert got is None and why.startswith("could not list the release PRs")
+
+
+def test_an_old_pending_plan_without_lanes_still_loads(tmp_path):
+    led = Ledger(str(tmp_path / "l.db"))
+    led.set_meta(tg.PENDING_KEY, json.dumps({"name": "v2026.11.24", "sha": A, "batches": ["B-1"],
+                                             "previous": "", "notes": "n"}))
+    repo = FakeRepo(tags={"v2026.11.24": A})
+    out = _tagger(tmp_path, repo, ledger=led, slack=FakeSlack()).run_pass()
+    assert out.tagged and out.plan.lanes == {}
