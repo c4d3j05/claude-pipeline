@@ -159,7 +159,7 @@ host (OpenSpec change `web-dashboard`). One tab per area, each refreshed by HTMX
 | Board | The Vikunja board by bucket, release trackers first, each task linked |
 | Pipeline | Busy workers (stage, elapsed, spend, last activity) and every ticket's history |
 | Planner | Open investigations and what was filed, with links to the Slack thread and the Vikunja tasks |
-| Explorer | UAT's commit, runs, findings filtered by state (including escalated), open and answered questions, batches and hotfixes |
+| Explorer | UAT's commit, runs, findings filtered by state (including escalated), open and answered questions, batches and hotfixes, a Lanes table (focus, last and next run, today's spend against the lane's share, open findings) once explorer reports lanes |
 | Services | What `systemctl --user status` shows for every unit in `DASHBOARD_UNITS`: state, since when, PID, memory, CPU, restarts, timers' last and next run, and the processes running inside each one (a release test, a worker session). Read-only |
 
 ```bash
@@ -210,15 +210,22 @@ UAT after it merges. A ticket PR into `main` (a DM ticket, a hotfix) is always a
 
 ## Release tags
 
-With `RELEASE_TAGS=true` the target repo is tagged once a batch is settled and checked: when every
-finding of a batch is resolved or dismissed, explorer runs a release check on that UAT commit (every
-promoted script, the permission probe, the state probes) and marks the commit with the commit status
-`explorer/batch-settled`: `success` only when the check passed, `failure` otherwise. Only the
-latest status per commit counts, and a `failure` is never tagged. At most every `TAG_POLL_MIN` the dispatcher reads the
-statuses of the base branch's first-parent commits since the last `TAG_PREFIX` tag, and on the
-newest settled one creates an annotated tag named after the local date (`v2026.11.24`, `.2` for a
-second the same day), pushes it, creates a GitHub Release (the settled batches, then every PR merged
-since the previous tag) and posts one line in Slack. A failure is alerted once and retried.
+With `RELEASE_TAGS=true` the target repo is tagged once every merged release is settled and checked:
+when every finding of a batch is resolved or dismissed, explorer runs a release check on that UAT commit
+(every promoted script, the permission probe, the state probes) and marks the commit with a commit status,
+`explorer/batch-settled` or, per module lane, `explorer/batch-settled/<lane>`: `success` only when the
+check passed, `failure` otherwise. Only the latest status of each context on a commit counts, and a batch
+with a `failure` on a commit is not settled there. The release PR body carries the line `Batch: B-n`
+copied from the release tracker. At most every `TAG_POLL_MIN` the dispatcher reads the statuses of the
+base branch's first-parent commits since the last `TAG_PREFIX` tag and the merged release PRs, and tags
+the newest commit with a settled batch at which every batch release merged up to it has a success for
+its own batch id from its merge onward (lanes are not compared; releases without a `Batch:` line and
+direct merges never block). It creates an annotated tag named after the local date (`v2026.11.24`, `.2`
+for a second the same day), pushes it, creates a GitHub Release (the settled batches with their lanes,
+then every PR merged since the previous tag) and posts one line in Slack. A failure is alerted once and
+retried. When every settled commit is blocked nothing is tagged and one `blocked by R-n (B-n, PR #n,
+merged <sha9>): ...` line per blocking release is logged (and printed by `claude-pipeline tag
+--dry-run`); it is never posted to Slack.
 
 A tag is never moved or deleted, and only commits on the first-parent history of the base branch
 are tagged. So `v*` tags exist only on settled commits whose release check passed, and a production deploy can

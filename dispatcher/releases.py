@@ -43,6 +43,7 @@ RELEASE_LINE = re.compile(r"^Release:\s*(R-\d+)\s*·\s*branch\s+(release/r-\d+)\
 RELEASE_BRANCH = re.compile(r"^release/r-\d+$")
 RELEASE_TITLE = re.compile(r"^Release (R-\d+)\s*$")
 REPAIR_TITLE = re.compile(r"^Repair release (R-\d+)\b")
+BATCH_LINE = re.compile(r"Batch:\s*(B-\d+)\b")
 TRACKER_LABEL = "release-tracker"
 IDENTITY = {"GIT_AUTHOR_NAME": "claude-pipeline", "GIT_AUTHOR_EMAIL": "claude-pipeline@users.noreply.github.com",
             "GIT_COMMITTER_NAME": "claude-pipeline",
@@ -63,6 +64,12 @@ def target_of(description_html: str | None) -> Target | None:
         if m and m.group(2) == f"release/{m.group(1).lower()}":
             found = Target(m.group(1), m.group(2))
     return found
+
+
+def batch_of(description: str | None) -> str:
+    """The batch id on a release tracker's `Batch: B-n` line, or ""."""
+    m = BATCH_LINE.search(description or "")
+    return m.group(1) if m else ""
 
 
 def is_release_branch(branch: str | None) -> bool:

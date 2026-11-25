@@ -1050,7 +1050,8 @@ class Dispatcher:
             if t.get("done"):
                 continue
             branch = f"release/{rel.lower()}"
-            subs = (self.vk.task(t["id"]).get("related_tasks") or {}).get("subtask") or []
+            task = self.vk.task(t["id"])
+            subs = (task.get("related_tasks") or {}).get("subtask") or []
             self._check_mismatch(rel, {s["id"] for s in subs}, board)
             if not subs or any(not s.get("done") for s in subs) or branch in open_heads or rel in repairs:
                 continue
@@ -1068,7 +1069,8 @@ class Dispatcher:
                 self._file_repair(target, tail=tail)
                 continue
             url = prmod.create_release_pr(self.cfg, branch, f"Release {rel}",
-                                          _release_body(rel, t, subs, self.task_link))
+                                          _release_body(rel, t, subs, self.task_link,
+                                                        batch=releases.batch_of(task.get("description"))))
             self.comment(t["id"], f"pr: {url}")
             outcome, why = (prmod.merge_release_into_main(self.cfg, url, branch, self.rgit.sha(f"origin/{branch}"))
                             if self.cfg.release_merge_to_main else ("off", ""))
@@ -1220,10 +1222,11 @@ def _is_claude_proc(pid: int) -> bool:
     return "claude" in out
 
 
-def _release_body(rel: str, tracker: dict, subs: list[dict], link) -> str:
+def _release_body(rel: str, tracker: dict, subs: list[dict], link, batch: str = "") -> str:
     lines = [(f"Release {rel}: every ticket below is merged into `release/{rel.lower()}` and the head passed "
               "the test gate."), "",
              ("**Merge with a merge commit, not a squash**: explorer checks each ticket's merge commit is on UAT, "
-              "and a squash hides them."), "", f"Tracker: #{tracker['id']} ({link(tracker['id'])})", "", "Tickets:"]
+              "and a squash hides them."), "", f"Tracker: #{tracker['id']} ({link(tracker['id'])})",
+             *([f"Batch: {batch}"] if batch else []), "", "Tickets:"]
     lines += [f"- #{s['id']} {s.get('title', '')}" for s in subs]
     return "\n".join(lines) + "\n"

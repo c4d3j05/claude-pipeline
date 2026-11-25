@@ -12,6 +12,21 @@
     {% elif d.paused %}<div class="big">paused</div><div class="muted small">{{ d.paused }}</div>
     {% else %}<div class="big">idle</div>{% endif %}</div>
 </section>
+{% if lanes %}
+<section class="card">
+  <h2>Lanes <span class="count">{{ lanes|length }}</span></h2>
+  <table>
+    <thead><tr><th>Lane</th><th>Focus</th><th>Last run</th><th>Next run</th><th>Today</th><th>Open findings</th></tr></thead>
+    <tbody>
+    {% for l in lanes %}
+    <tr><td class="mono">{{ l.lane }}</td><td class="mono">{{ l.focus }}</td>
+        <td class="muted small">{{ l.last_run|ago }}</td><td class="muted small">{{ l.next_run|until }}</td>
+        <td class="mono{{ ' alert-inline' if l.over }}">{{ l.spend }}</td><td class="mono">{{ l.open_findings }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
 
 <section class="card">
   <div class="row between"><h2>Findings</h2>

@@ -47,6 +47,20 @@ def ago(value, now: dt.datetime | None = None) -> str:
     return f"{secs} s ago"
 
 
+def until(value, now: dt.datetime | None = None) -> str:
+    """A future time as "in 3 h"; "due" when it has passed; "-" when unreadable."""
+    t = parse_ts(value)
+    if t is None:
+        return "-"
+    secs = int((t - (now or dt.datetime.now(dt.UTC))).total_seconds())
+    if secs <= 0:
+        return "due"
+    for unit, size in (("d", 86400), ("h", 3600), ("min", 60)):
+        if secs >= size:
+            return f"in {secs // size} {unit}"
+    return f"in {secs} s"
+
+
 def money(value) -> str:
     try:
         return f"${float(value):,.2f}"
@@ -179,3 +193,36 @@ def findings(ex: dict, state: str = "open") -> tuple[list[dict], dict[str, int]]
     else:
         rows = [f for f in items if f.get("state") == state]
     return sorted(rows, key=lambda f: f.get("last_seen") or "", reverse=True), counts
+
+
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _count(v) -> int:
+    return v if isinstance(v, int) and not isinstance(v, bool) else 0
+
+
+def lanes(ex: dict) -> list[dict]:
+    """Rows for the Lanes table, in the order explorer gives them. [] hides the table."""
+    items = ex.get("lanes")
+    if not isinstance(items, list):
+        return []
+    rows = []
+    for e in items:
+        if not isinstance(e, dict) or not isinstance(e.get("lane"), str) or not e["lane"]:
+            continue
+        f = e.get("focus")
+        if isinstance(f, dict) and f.get("batch") and isinstance(f.get("batch"), str):
+            focus = f"{f['batch']} · {_count(f.get('settled'))}/{_count(f.get('total'))}"
+        else:
+            focus = "\u2014"
+        spent, budget = e.get("spent_today"), e.get("budget")
+        rows.append({
+            "lane": e["lane"], "focus": focus,
+            "last_run": e.get("last_run"), "next_run": e.get("next_run"),
+            "spend": f"{money(spent)} / {money(budget)}",
+            "over": _num(spent) and _num(budget) and budget > 0 and spent >= budget,
+            "open_findings": _count(e.get("open_findings")),
+        })
+    return rows

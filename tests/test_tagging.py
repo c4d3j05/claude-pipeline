@@ -16,19 +16,22 @@ DAY = dt.date(2026, 11, 24)
 A, B, C = "a" * 40, "b" * 40, "c" * 40          # first-parent commits, newest first
 
 
-def _status(state="success", desc="B-1 settled: 3 findings", context=tg.CONTEXT):
+def _status(state="success", desc="B-1 settled: 3 findings", context=tg.CONTEXT, lane=""):
+    if lane:
+        context = f"{tg.CONTEXT}/{lane}"
     return {"context": context, "state": state, "description": desc}
 
 
 class FakeRepo:
     """Answers the git and gh calls tagging makes; records every call."""
 
-    def __init__(self, *, tags=None, commits=(A, B, C), statuses=None, fail=(), log=None):
+    def __init__(self, *, tags=None, commits=(A, B, C), statuses=None, fail=(), log=None, prs=()):
         self.tags = dict(tags or {})                 # name -> sha (local, after fetch)
         self.pushed = set(self.tags)
         self.releases: dict[str, str] = {}
         self.commits, self.statuses = list(commits), statuses or {}
         self.fail, self.log = set(fail), log or {}
+        self.prs = list(prs)                         # merged release PRs `gh pr list` returns
         self.calls: list[list[str]] = []
 
     def __call__(self, args, **kw):
@@ -66,6 +69,8 @@ class FakeRepo:
                 self.pushed.add(rest[-1].removeprefix("refs/tags/"))
                 return ok()
         if tool == "gh":
+            if rest[:2] == ["pr", "list"]:
+                return ok(json.dumps(list(self.prs)))
             if rest[0] == "api":
                 sha = rest[1].split("/commits/")[1].split("/")[0]
                 return ok(json.dumps(self.statuses.get(sha, [])))
@@ -216,3 +221,165 @@ def test_a_failed_push_is_retried_with_the_same_tag_and_no_release_yet(tmp_path)
     second = t.run_pass()
     assert second.tagged and second.plan.name == "v2026.11.24" and "v2026.11.24" in repo.pushed
     assert not ledger.get_meta(tg.PENDING_KEY) and len(slack.alerts) == 1 and len(slack.posts) == 1
+
+
+# --- lane contexts (change lane-tags) -------------------------------------------------------------
+R6 = {"number": 650, "headRefName": "release/r-6", "mergeCommit": {"oid": B}, "body": "Batch: B-6\n"}
+
+
+def test_settled_on_reads_every_lane_context_latest_first():
+    statuses = [_status(desc="B-4 settled; check passed: 5/5 scripts", lane="billing"),
+                _status(state="failure", desc="B-6 settled; check failed: 1 script", lane="portal"),
+                _status(desc="B-1 settled: 3 findings"),
+                _status(context="ci/test", desc="ok")]
+    assert tg.settled_on(statuses) == {"B-4": "billing", "B-1": ""}
+    assert tg.settled_on([_status(desc="B-2 settled", context="explorer/batch-settled/Bad_Lane")]) == {}
+    newer_failure = [_status(state="failure", desc="B-4 settled", lane="billing"),
+                     _status(desc="B-4 settled", lane="billing")]
+    assert tg.settled_on(newer_failure) == {}
+
+
+def test_one_batch_under_several_contexts_failure_wins():
+    def row(*pairs):
+        return tg.settled_on([_status(state=st, desc="B-4 settled", lane=lane) for st, lane in pairs])
+    assert row(("success", ""), ("success", "billing")) == {"B-4": "billing"}
+    assert row(("failure", ""), ("success", "billing")) == {}
+    assert row(("success", "portal"), ("success", "billing")) == {"B-4": "billing"}
+    assert row(("pending", "billing"), ("success", "")) == {"B-4": ""}
+
+
+def test_release_prs_are_read_through_gh(tmp_path):
+    repo = FakeRepo(prs=[R6])
+    assert _tagger(tmp_path, repo)._release_prs() == ([R6], "")
+    call = next(c for c in repo.calls if c[:3] == ["gh", "pr", "list"])
+    assert "--state" in call and call[call.index("--state") + 1] == "merged"
+    got, why = _tagger(tmp_path, FakeRepo(fail=("pr list",)))._release_prs()
+    assert got is None and why.startswith("could not list the release PRs")
+
+
+def test_an_old_pending_plan_without_lanes_still_loads(tmp_path):
+    led = Ledger(str(tmp_path / "l.db"))
+    led.set_meta(tg.PENDING_KEY, json.dumps({"name": "v2026.11.24", "sha": A, "batches": ["B-1"],
+                                             "previous": "", "notes": "n"}))
+    repo = FakeRepo(tags={"v2026.11.24": A})
+    out = _tagger(tmp_path, repo, ledger=led, slack=FakeSlack()).run_pass()
+    assert out.tagged and out.plan.lanes == {}
+
+
+# --- the rule across lanes ------------------------------------------------------------------------
+def _pr(number, rel, batch, merged_at, head=None, body=None):
+    return {"number": number, "headRefName": head or f"release/r-{rel}", "mergeCommit": {"oid": merged_at},
+            "body": body if body is not None else f"Release R-{rel}\n\nTracker: #1\nBatch: {batch}\n"}
+
+
+R5, R6B = _pr(645, 5, "B-5", C), _pr(650, 6, "B-6", B)
+BLOCKED_R6 = [("blocked by R-6 (B-6, PR #650, merged bbbbbbbbb): "
+               "no successful explorer/batch-settled status for B-6 since its merge")]
+
+
+def _blocked_by_r6():
+    return FakeRepo(prs=[R5, R6B],
+                    statuses={A: [_status(desc="B-5 settled", lane="accounts-contacts")]})
+
+
+def test_an_unreadable_pr_list_is_an_error(tmp_path):
+    repo = FakeRepo(fail=("pr list",), statuses={A: [_status()]})
+    out = _tagger(tmp_path, repo).run_pass()
+    assert out.error.startswith("could not list the release PRs") and out.blockers == []
+    assert out.plan is None and not _writes(repo)
+
+
+def test_one_lane_settled_while_another_release_is_merged_blocks_the_tag(tmp_path):
+    repo, slack = _blocked_by_r6(), FakeSlack()
+    tagger = _tagger(tmp_path, repo, slack=slack)
+    assert tagger.plan() == (None, "", BLOCKED_R6)
+    out = tagger.run_pass()
+    assert out.plan is None and not out.tagged and not out.error and out.blockers == BLOCKED_R6
+    assert not _writes(repo) and not slack.posts and not slack.alerts
+
+
+def test_both_lanes_settled_tags_and_names_both(tmp_path):
+    repo, slack = FakeRepo(prs=[R5, R6B], statuses={A: [
+        _status(desc="B-5 settled", lane="accounts-contacts"), _status(desc="B-6 settled", lane="billing")]}), FakeSlack()
+    out = _tagger(tmp_path, repo, slack=slack).run_pass()
+    assert out.tagged and out.plan.sha == A and out.plan.batches == ["B-5", "B-6"]
+    assert out.plan.lanes == {"B-5": "accounts-contacts", "B-6": "billing"}
+    assert out.plan.notes.startswith("B-5 (accounts-contacts), B-6 (billing) settled on UAT at `aaaaaaaaa`")
+    assert "B-5 (accounts-contacts), B-6 (billing) settled" in slack.posts[0]
+    tag_call = next(c for c in repo.calls if c[:2] == ["git", "tag"])
+    assert "B-5 (accounts-contacts), B-6 (billing) settled on UAT" in tag_call[-1]
+
+
+def _older_commit_fixture():
+    return FakeRepo(prs=[R5, _pr(650, 6, "B-6", A)], statuses={
+        B: [_status(desc="B-5 settled", lane="accounts-contacts")],
+        A: [_status(desc="B-5 settled", lane="accounts-contacts")]})
+
+
+def test_an_older_covered_commit_is_tagged_when_the_newest_is_blocked(tmp_path):
+    repo = _older_commit_fixture()
+    tagger = _tagger(tmp_path, repo)
+    plan, err, blockers = tagger.plan()
+    assert plan.sha == B and not err and blockers[0].startswith("blocked by R-6 (B-6, PR #650")
+    out = _tagger(tmp_path, _older_commit_fixture()).run_pass()
+    assert out.tagged and out.plan.sha == B and out.blockers == []
+
+
+def test_a_legacy_status_covers_its_own_batch(tmp_path):
+    repo = FakeRepo(prs=[_pr(641, 1, "B-1", B)], statuses={A: [_status(desc="B-1 settled")]})
+    out = _tagger(tmp_path, repo).run_pass()
+    assert out.tagged and out.plan.sha == A and out.plan.lanes == {"B-1": ""}
+    assert out.plan.notes.startswith("B-1 settled")
+
+
+def test_a_status_before_the_merge_does_not_cover(tmp_path):
+    repo = FakeRepo(prs=[_pr(644, 4, "B-4", A)], statuses={
+        B: [_status(desc="B-4 settled", lane="billing")], A: [_status(desc="B-9 settled", lane="portal")]})
+    plan, _err, blockers = _tagger(tmp_path, repo).plan()
+    assert plan.sha == B and len(blockers) == 1 and blockers[0].startswith("blocked by R-4 (B-4, PR #644")
+
+
+def test_a_release_pr_without_a_batch_line_never_blocks(tmp_path):
+    repo = FakeRepo(prs=[_pr(642, 2, "", B, body="Tracker: #841\n")],
+                    statuses={A: [_status(desc="B-9 settled", lane="billing")]})
+    out = _tagger(tmp_path, repo).run_pass()
+    assert out.tagged and out.plan.sha == A
+
+
+def test_a_failure_status_alone_tags_nothing(tmp_path):
+    repo = FakeRepo(prs=[R6B], statuses={A: [
+        _status(state="failure", desc="B-4 settled; check failed", lane="billing")]})
+    out = _tagger(tmp_path, repo).run_pass()
+    assert out.plan is None and out.blockers == [] and not out.error
+    assert not any(c[:3] == ["gh", "pr", "list"] for c in repo.calls)
+
+
+def test_two_releases_of_one_batch_each_need_coverage(tmp_path):
+    prs = [R5, _pr(651, 7, "B-5", A)]
+    out = _tagger(tmp_path, FakeRepo(prs=prs, statuses={B: [_status(desc="B-5 settled")]})).run_pass()
+    assert out.tagged and out.plan.sha == B
+    out = _tagger(tmp_path, FakeRepo(prs=prs, statuses={A: [_status(desc="B-5 settled")]})).run_pass()
+    assert out.tagged and out.plan.sha == A
+
+
+def test_a_release_pr_with_another_head_still_counts(tmp_path):
+    repo = FakeRepo(prs=[_pr(652, 0, "B-8", B, head="hotfix-totals")],
+                    statuses={A: [_status(desc="B-9 settled", lane="billing")]})
+    plan, err, blockers = _tagger(tmp_path, repo).plan()
+    assert plan is None and not err
+    assert blockers[0].startswith("blocked by hotfix-totals (B-8, PR #652, merged bbbbbbbbb)")
+
+
+# --- what a blocked pass reports ------------------------------------------------------------------
+def test_dry_run_prints_the_blockers(tmp_path):
+    repo = _blocked_by_r6()
+    out = _tagger(tmp_path, repo).run_pass(dry_run=True)
+    assert tg.describe(out) == ("Nothing to tag: every commit with a settled batch also contains a "
+                                "release that is not settled yet.\n" + BLOCKED_R6[0])
+    assert not _writes(repo)
+
+
+def test_blockers_are_not_reported_when_an_older_commit_is_tagged(tmp_path):
+    out = _tagger(tmp_path, _older_commit_fixture()).run_pass()
+    assert out.tagged and out.blockers == []
+    assert not any(ln.startswith("blocked by") for ln in tg.describe(out).splitlines())

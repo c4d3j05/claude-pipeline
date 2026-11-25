@@ -36,7 +36,7 @@ def create_app(cfg: Config, sources: Sources | None = None) -> FastAPI:
     src = sources or Sources(cfg)
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     env = templates.env
-    env.filters.update(ago=views.ago, money=views.money, url=safe_url,
+    env.filters.update(ago=views.ago, until=views.until, money=views.money, url=safe_url,
                        short=lambda v: str(v or "")[:7] or "-")
     env.globals.update(refresh=cfg.dashboard_refresh_sec, tabs=TABS)
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
@@ -77,6 +77,7 @@ def create_app(cfg: Config, sources: Sources | None = None) -> FastAPI:
                 state = state if state in FINDING_FILTERS else "open"
                 rows, counts = views.findings(ctx["res"].data, state)
                 ctx.update(findings=rows, counts=counts, state=state, filters=FINDING_FILTERS)
+                ctx["lanes"] = views.lanes(ctx["res"].data)
         return templates.TemplateResponse(request, f"{tab}.html", ctx)
 
     @app.get("/{tab}", response_class=HTMLResponse)
