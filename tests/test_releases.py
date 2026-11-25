@@ -229,6 +229,30 @@ def _t(tid, title="t", desc="", labels=("claude",), done=False):
             "related_tasks": {}}
 
 
+def test_batch_of_reads_the_tracker_line():
+    assert rl.batch_of("Batch: B-6\n\nRelease R-6: \u2026") == "B-6"
+    assert rl.batch_of("<p>Batch: B-12</p>") == "B-12"
+    assert rl.batch_of("no line") == "" and rl.batch_of(None) == ""
+
+
+def test_the_release_pr_body_names_the_batch():
+    tracker, subs = {"id": 861}, [{"id": 862, "title": "Fix the invoice total"}]
+    link = lambda tid: f"https://vk.example/tasks/{tid}"
+    lines = dmod._release_body("R-6", tracker, subs, link, batch="B-6").splitlines()
+    i = next(n for n, ln in enumerate(lines) if ln.startswith("Tracker: #"))
+    assert lines[i + 1] == "Batch: B-6"
+    plain = dmod._release_body("R-6", tracker, subs, link, batch="")
+    assert "Batch:" not in plain and plain == dmod._release_body("R-6", tracker, subs, link)
+    assert "Tracker: #861 (https://vk.example/tasks/861)\n\nTickets:" in plain
+
+
+def test_release_pass_puts_the_trackers_batch_in_the_pr_body(tmp_path, monkeypatch):
+    d, ev = _release_dispatcher(tmp_path, monkeypatch, [{"id": 1, "title": "Fix A", "done": True}],
+                                [_t(1, "Fix A", DESC)])
+    d.release_pass()
+    assert "Batch: B-1" in ev["created"][0][2].splitlines()
+
+
 def test_a_tracker_is_never_claimed_and_a_release_under_repair_waits(tmp_path):
     d = _dispatcher(tmp_path)
     tracker = _t(1, "Release R-4", "Batch: B-1", labels=("release-tracker", "claude"))

@@ -4,11 +4,11 @@ test from the tasks before it: run `uv run pytest tests/test_tagging.py tests/te
 in unrelated tests (`tests/test_gaps.py`); rerun once before treating a failure there as yours.
 
 ## 1. The release PR names its batch
-- [ ] 1.1 `dispatcher/releases.py`: add `BATCH_LINE` and `batch_of(description)` exactly as in design.md
+- [x] 1.1 `dispatcher/releases.py`: add `BATCH_LINE` and `batch_of(description)` exactly as in design.md
       ("The release PR body"). Test `tests/test_releases.py::test_batch_of_reads_the_tracker_line`:
       `batch_of("Batch: B-6\n\nRelease R-6: …") == "B-6"`, `batch_of("<p>Batch: B-12</p>") == "B-12"`,
       `batch_of("no line") == ""`, `batch_of(None) == ""`.
-- [ ] 1.2 `dispatcher/daemon.py`: `_release_body(rel, tracker, subs, link, batch="")` adds `Batch: <batch>`
+- [x] 1.2 `dispatcher/daemon.py`: `_release_body(rel, tracker, subs, link, batch="")` adds `Batch: <batch>`
       right after the `Tracker:` line when `batch` is non-empty. In `release_pass`, keep the result of
       `self.vk.task(t["id"])` in a variable, read `subs` from it as today, and pass
       `batch=releases.batch_of(task.get("description"))` to `_release_body`.
