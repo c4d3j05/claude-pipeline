@@ -53,9 +53,11 @@ in unrelated tests (`tests/test_gaps.py`); rerun once before treating a failure 
         → `run_pass()` returns `error` starting `could not list the release PRs`, `blockers == []`, writes nothing.
       - `test_one_lane_settled_while_another_release_is_merged_blocks_the_tag`: prs = R-5 (`Batch: B-5`,
         merged at `C`) and R-6 (`Batch: B-6`, merged at `B`); statuses `{A: [_status(desc="B-5 settled", lane="accounts-contacts")]}`.
-        `run_pass()`: `plan is None`, no error, no writes, no Slack post, and `blockers ==
+        In this task assert on `tagger.plan()` directly: it returns `(None, "", blockers)` with `blockers ==
         ["blocked by R-6 (B-6, PR #650, merged bbbbbbbbb): no successful explorer/batch-settled status for B-6 since its merge"]`
-        (PR number 650 in the fixture).
+        (PR number 650 in the fixture); and `run_pass()` tags nothing, returns no error, writes nothing and
+        posts nothing to Slack. `Outcome.blockers` is not asserted here: task 2.6 adds that field and extends
+        this test with `out.blockers == blockers`.
       - `test_both_lanes_settled_tags_and_names_both`: same prs; `A` carries success for B-5
         (accounts-contacts) and B-6 (billing). Tagged on `A`; `plan.batches == ["B-5", "B-6"]`;
         `plan.lanes == {"B-5": "accounts-contacts", "B-6": "billing"}`; notes start
@@ -82,6 +84,8 @@ in unrelated tests (`tests/test_gaps.py`); rerun once before treating a failure 
       - Every test that existed before this change still passes without edits to its assertions.
 - [ ] 2.6 `run_pass()` logs blockers at info and sets `Outcome.blockers` only when nothing is tagged, per
       the table in design.md ("Blockers"); `describe()` prints exactly the outputs listed there.
+      Extend `test_one_lane_settled_while_another_release_is_merged_blocks_the_tag` (from 2.5) with
+      `run_pass().blockers ==` the same one-line list.
       Test `test_dry_run_prints_the_blockers`: the fixture of
       `test_one_lane_settled_while_another_release_is_merged_blocks_the_tag` with `run_pass(dry_run=True)`;
       `tg.describe(out)` equals the two-line "Every candidate blocked" output in design.md; nothing is written.
