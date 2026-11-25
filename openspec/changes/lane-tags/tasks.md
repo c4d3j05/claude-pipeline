@@ -43,7 +43,7 @@ in unrelated tests (`tests/test_gaps.py`); rerun once before treating a failure 
       `{"name": "v2026.11.24", "sha": A, "batches": ["B-1"], "previous": "", "notes": "n"}` in the ledger
       under `tag_pending` with the tag present locally on `A`; `run_pass()` publishes it (`tagged`), and
       `plan.lanes == {}`.
-- [ ] 2.5 `Tagger.plan()` implements "The rule" in design.md and returns `(plan, error, blockers)`; update
+- [x] 2.5 `Tagger.plan()` implements "The rule" in design.md and returns `(plan, error, blockers)`; update
       its one caller `run_pass()`. Read statuses for the whole window first (as today), then the release PRs
       (only when at least one candidate exists, so a window with no success makes no `gh pr list` call).
       Fixture PR numbers, used wherever these releases appear: R-1 #641, R-2 #642, R-4 #644, R-5 #645,
@@ -82,7 +82,7 @@ in unrelated tests (`tests/test_gaps.py`); rerun once before treating a failure 
         (`Batch: B-8`, merged at `B`); `A` has success B-9 (billing). `plan is None` and the blocker line starts
         `blocked by hotfix-totals (B-8, PR #652, merged bbbbbbbbb)`.
       - Every test that existed before this change still passes without edits to its assertions.
-- [ ] 2.6 `run_pass()` logs blockers at info and sets `Outcome.blockers` only when nothing is tagged, per
+- [x] 2.6 `run_pass()` logs blockers at info and sets `Outcome.blockers` only when nothing is tagged, per
       the table in design.md ("Blockers"); `describe()` prints exactly the outputs listed there.
       Extend `test_one_lane_settled_while_another_release_is_merged_blocks_the_tag` (from 2.5) with
       `run_pass().blockers ==` the same one-line list.
@@ -92,7 +92,7 @@ in unrelated tests (`tests/test_gaps.py`); rerun once before treating a failure 
       Test `test_blockers_are_not_reported_when_an_older_commit_is_tagged`: the fixture of
       `test_an_older_covered_commit_is_tagged_when_the_newest_is_blocked`; `out.tagged`, `out.blockers == []`,
       and `tg.describe(out)` has no line starting `blocked by`.
-- [ ] 2.7 Update the module docstring of `dispatcher/tagging.py` and the "Release tags" section of
+- [x] 2.7 Update the module docstring of `dispatcher/tagging.py` and the "Release tags" section of
       `README.md` to describe the per-lane contexts, the rule, and the blocker lines.
 
 ## 3. Deploy (not code; the owner does these)
