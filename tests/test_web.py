@@ -265,6 +265,39 @@ def test_ago_reads_local_and_aware_times():
     assert views.ago(None) == "-" and views.ago("nonsense") == "-"
 
 
+def test_until_reads_future_times():
+    now = dt.datetime(2026, 11, 25, 12, 0, tzinfo=dt.UTC)
+    assert views.until("2026-11-25T15:00:00+00:00", now=now) == "in 3 h"
+    assert views.until("2026-11-25T12:12:00+00:00", now=now) == "in 12 min"
+    assert views.until("2026-11-27T12:00:00+00:00", now=now) == "in 2 d"
+    assert views.until("2026-11-25T11:00:00+00:00", now=now) == "due"
+    assert views.until(None) == "-" and views.until("nope") == "-"
+
+
+LANES = [
+    {"lane": "accounts-contacts", "focus": None, "last_run": "2026-11-25T06:02:11+00:00",
+     "next_run": "2026-11-26T06:00:00+00:00", "spent_today": 3.2, "budget": 10.0, "open_findings": 4},
+    {"lane": "billing", "focus": {"batch": "B-4", "settled": 2, "total": 6}, "last_run": None,
+     "next_run": None, "spent_today": 0, "budget": 10.0, "open_findings": 9},
+]
+
+
+def test_lanes_rows():
+    rows = views.lanes({"lanes": LANES})
+    assert [r["lane"] for r in rows] == ["accounts-contacts", "billing"]
+    assert rows[0]["focus"] == "\u2014" and rows[0]["spend"] == "$3.20 / $10.00"
+    assert rows[0]["over"] is False and rows[0]["open_findings"] == 4
+    assert rows[1]["focus"] == "B-4 \u00b7 2/6" and rows[1]["spend"] == "$0.00 / $10.00"
+
+
+def test_lanes_tolerates_bad_data():
+    assert views.lanes({}) == [] and views.lanes({"lanes": "x"}) == [] and views.lanes({"lanes": []}) == []
+    rows = views.lanes({"lanes": [7, {"focus": None},
+                                  {"lane": "portal", "budget": 5, "spent_today": 5}]})
+    assert len(rows) == 1 and rows[0]["lane"] == "portal"
+    assert rows[0]["over"] is True and rows[0]["focus"] == "\u2014" and rows[0]["open_findings"] == 0
+
+
 # --- pages -------------------------------------------------------------------------------------------
 @pytest.mark.parametrize("path", ["/", "/board", "/pipeline", "/planner", "/explorer"])
 def test_every_tab_is_a_shell_that_htmx_refreshes(cfg, path):
@@ -285,6 +318,18 @@ def test_sections_render_the_sources(cfg):
     assert "63d6fd5b" in plan and "Fix the export" in plan and "https://vk.example/tasks/531" in plan
     ex = c.get("/section/explorer").text
     assert "Export button does nothing" in ex and "waits for you" in ex and "H-b4cd06d67232-2" in ex
+
+
+def test_the_lanes_table_shows_each_lane(cfg):
+    ex = client(cfg, explorer=lambda: {**EXPLORER, "lanes": LANES}).get("/section/explorer").text
+    assert "<h2>Lanes" in ex and "accounts-contacts" in ex
+    assert "B-4 \u00b7 2/6" in ex and "$3.20 / $10.00" in ex
+    assert ex.index("Lanes") < ex.index("<h2>Findings")
+
+
+def test_no_lanes_block_leaves_the_tab_as_it_was(cfg):
+    ex = client(cfg).get("/section/explorer").text
+    assert "<h2>Lanes" not in ex and "Export button does nothing" in ex
 
 
 def test_explorer_filter_and_unsafe_links(cfg):
