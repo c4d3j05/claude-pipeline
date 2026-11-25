@@ -24,9 +24,17 @@ New pure function:
 
 ```python
 def settled_on(statuses: list[dict]) -> dict[str, str]:
-    """{batch id: lane} for every context whose latest status on this commit is a success.
-    lane is "" for the legacy context."""
+    """{batch id: lane} for every batch settled on this commit. lane is "" for the legacy context."""
 ```
+
+How it decides, in three steps:
+
+1. Keep the latest status of each settled context (the first one of that context in the list).
+2. Group them by the batch id in their description. A batch is **settled on this commit** only when at
+   least one of its contexts' latest status is `success` **and none is `failure`** (a failure wins, whatever
+   the order). Any other state (`pending`, `error`) neither settles nor blocks.
+3. Its lane is the lane of a successful lane context; when two lane contexts succeeded, the first in sorted
+   order; when only the legacy context succeeded, `""`.
 
 Example: statuses (newest first)
 `[{"context": "explorer/batch-settled/billing", "state": "success", "description": "B-4 settled; check passed: …"},
@@ -34,6 +42,15 @@ Example: statuses (newest first)
   {"context": "explorer/batch-settled", "state": "success", "description": "B-1 settled: 3 findings"},
   {"context": "ci/test", "state": "success", "description": "ok"}]`
 → `{"B-4": "billing", "B-1": ""}`.
+
+One batch under several contexts on one commit (descriptions shortened to `B-4 settled`):
+
+| Latest per context | Result |
+|---|---|
+| `explorer/batch-settled` success + `explorer/batch-settled/billing` success | `{"B-4": "billing"}` |
+| `explorer/batch-settled` failure + `explorer/batch-settled/billing` success | `{}` (not settled) |
+| `explorer/batch-settled/portal` success + `explorer/batch-settled/billing` success | `{"B-4": "billing"}` (`billing` sorts before `portal`) |
+| `explorer/batch-settled/billing` pending + `explorer/batch-settled` success | `{"B-4": ""}` |
 
 `settled_batches(statuses)` stays, with its current signature and behaviour (legacy context only), because
 `tests/test_tagging.py::test_only_the_latest_status_of_the_context_counts` uses it.
@@ -51,11 +68,17 @@ A non-zero exit or unparsable JSON returns `(None, "could not list the release P
 which `plan()` returns as its error (alerted once and retried like any other error). Only the newest 100
 merged release PRs are seen; older ones are outside any realistic window.
 
-From each PR: `release` = `headRefName` `release/r-6` → `R-6` (upper-cased text after `release/`);
+From each PR: `release` = `headRefName` `release/r-6` → `R-6` (upper-cased text after `release/`); a head
+that does not start with `release/` (for example `hotfix-totals`) still counts and is named by its head ref
+as is (`hotfix-totals`);
 `merge` = `mergeCommit["oid"]` (full SHA; skip the PR when missing); `batch` = first match of
 `Batch:\s*(B-\d+)` in `body` (skip the PR when there is none: releases opened before this change, and
 releases that came from a DM and have no batch, never block). A PR whose `merge` is not in the window is
 skipped (merged before the previous tag, or not on the first-parent history).
+
+Two merged PRs that name the same batch (a release reopened, or a repair release) are two batch releases:
+each needs coverage from its own merge onward. One success for that batch at or after the later merge
+covers both.
 
 ## The rule
 
@@ -78,8 +101,11 @@ Consequences, stated so nobody has to derive them:
 - A direct merge into `main` (a DM ticket, a hotfix) is not a batch release and never blocks.
 
 `Plan.batches` = every batch id found in `S[j]` for `j >= i` (the candidate and older), sorted by number,
-as today. `Plan.lanes` = `{batch: lane}` for those ids; when the same batch appears with a lane and without,
-the non-empty lane wins.
+as today. `Plan.lanes` = `{batch: lane}` for those ids; when the same batch appears on several commits,
+the newest commit's lane is kept unless it is `""` and an older one is not (a non-empty lane wins).
+
+`plan()` keeps reading the statuses of every commit in the window, as today, before it looks at any
+release PR.
 
 ## Shapes
 
@@ -122,14 +148,35 @@ When a candidate fails the rule, one line is recorded for each uncovered batch r
 `blocked by R-6 (B-6, PR #650, merged 1a2b3c4d5): no successful explorer/batch-settled status for B-6 since its merge`
 
 - `plan()` returns the lines through a new third element: `plan() -> tuple[Plan | None, str, list[str]]`.
-  They are returned whether or not an older candidate ends up tagged.
-- `run_pass()` copies them to `Outcome.blockers`, and logs each at info (`log.info("release tag: %s", line)`).
-  It never posts them to Slack and never alerts for them: a blocked tag is a normal waiting state.
-- `describe()` prints them: when `plan is None` and there are blockers, the output is
-  `Nothing to tag: every commit with a settled batch also contains a release that is not settled yet.`
-  followed by the blocker lines, one per line; when a plan exists, the lines are appended after the notes
-  under a line `Not included (newer commits):`. `claude-pipeline tag` keeps exit code 0 unless
-  `Outcome.error` is set (unchanged in `cmd_tag`, `dispatcher/__main__.py:227-240`).
+  It returns them whether or not an older candidate ends up as the plan; `run_pass()` decides what to do
+  with them.
+- `run_pass()` logs each line at info (`log.info("release tag: %s", line)`) in every case, never posts them
+  to Slack and never alerts for them: a blocked tag is a normal waiting state.
+- `Outcome.blockers` is filled in exactly one case: the pass tags nothing because every candidate is
+  blocked (`plan is None` and `error == ""`). In every other case it is `[]`:
+
+| Pass | `Outcome.plan` | `Outcome.blockers` |
+|---|---|---|
+| Nothing settled in the window | `None` | `[]` |
+| Every candidate blocked | `None` | the lines |
+| An older candidate is tagged (or would be, on a dry run) | the plan | `[]` (lines only logged) |
+| A pending plan from an earlier pass is finished (`_pending()` path; `plan()` is not called) | the pending plan | `[]` |
+| An error (`fetch`, statuses, `gh pr list`) | `None` | `[]` |
+
+`describe(outcome)` output, literally:
+
+- Nothing settled (unchanged):
+  `Nothing to tag: no commit since the previous tag has a settled batch.`
+- Every candidate blocked:
+  ```
+  Nothing to tag: every commit with a settled batch also contains a release that is not settled yet.
+  blocked by R-6 (B-6, PR #650, merged bbbbbbbbb): no successful explorer/batch-settled status for B-6 since its merge
+  ```
+- A plan (dry run or tagged): today's output, unchanged; no blocker lines.
+- An error (unchanged): `error: <text>`.
+
+`claude-pipeline tag` keeps exit code 0 unless `Outcome.error` is set (unchanged in `cmd_tag`,
+`dispatcher/__main__.py:227-240`).
 
 ## The release PR body
 

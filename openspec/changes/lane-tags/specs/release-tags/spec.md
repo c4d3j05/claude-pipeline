@@ -14,6 +14,19 @@ status of each context counts.
 - **WHEN** the latest `explorer/batch-settled/billing` status on a commit is a failure and an older one is a success
 - **THEN** that commit counts as not settled for billing
 
+### Requirement: One batch under several contexts
+When one batch id appears under several settled contexts on one commit, pipeline SHALL count it as settled
+there only if at least one context's latest status is a success and none is a failure. Its lane SHALL be
+that of a successful lane context (the first in sorted order), or none when only the legacy context succeeded.
+
+#### Scenario: A failure wins
+- **WHEN** B-4 has a failure under `explorer/batch-settled` and a success under `explorer/batch-settled/billing` on one commit
+- **THEN** B-4 is not settled on that commit
+
+#### Scenario: Legacy and lane both succeed
+- **WHEN** B-4 has a success under both `explorer/batch-settled` and `explorer/batch-settled/billing`
+- **THEN** B-4 is settled there with lane billing
+
 ### Requirement: Release PR names its batch
 The release PR body SHALL carry the line `Batch: B-<n>` copied from the release tracker's description
 when the tracker has one. pipeline SHALL read a release's batch only from that line.
@@ -30,6 +43,10 @@ batch id on a first-parent commit from its merge up to that commit. Lanes are no
 #### Scenario: One lane is not done
 - **WHEN** B-5 is settled on `abc123` but R-6 (batch B-6), merged before `abc123`, has no success for B-6
 - **THEN** `abc123` is not tagged
+
+#### Scenario: One batch released twice
+- **WHEN** two merged release PRs both name B-5 and a success for B-5 sits at or after the later merge
+- **THEN** both are covered by it
 
 #### Scenario: Every merged release is covered
 - **WHEN** `def456`, after both merges, has a success for B-5 and for B-6
@@ -48,9 +65,10 @@ is not a release PR (a DM ticket, a hotfix) SHALL NOT block a tag.
 - **THEN** that commit is tagged
 
 ### Requirement: Blocked tags are explained
-`claude-pipeline tag --dry-run` SHALL print one line per release blocking the newest settled commit:
+When every settled commit is blocked, `claude-pipeline tag --dry-run` SHALL print one line per release
+blocking the newest one:
 `blocked by R-<n> (B-<n>, PR #<number>, merged <sha9>): no successful explorer/batch-settled status for B-<n> since its merge`.
-A real pass SHALL log the same lines and post nothing to Slack for them.
+A real pass SHALL log the lines and post nothing to Slack. When an older commit is tagged they are only logged.
 
 #### Scenario: Dry run while billing is unverified
 - **WHEN** R-6 blocks the tag and the owner runs `claude-pipeline tag --dry-run`

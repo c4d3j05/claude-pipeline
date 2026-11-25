@@ -38,6 +38,11 @@ needs to see, per lane, whether it is in focus, when it last ran and will next r
 - Any control (pause a lane, run a lane): the dashboard stays read-only.
 - A new status JSON schema version: `lanes` is an additive key and `"schema"` stays `1`.
 
+## Deploy order
+
+Safe to deploy before or after explorer's `module-lanes`: without a usable `lanes` list the card is simply
+not rendered, and once explorer sends one the card appears on the next refresh with no restart.
+
 ## Impact
 
 - pipeline: `dispatcher/web/views.py`, `dispatcher/web/app.py` (the `section` route and the filter list),
