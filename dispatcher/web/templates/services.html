@@ -1,4 +1,4 @@
-{% from "_macros.html" import unavailable, badge, more %}
+{% from "_macros.html" import unavailable, badge, more, action %}
 {% if not res.ok %}{{ unavailable(res) }}{% else %}
 {% set d = res.data %}
 {% if not d.available %}
@@ -6,9 +6,9 @@
 {% else %}
 <section class="card">
   <h2>Services</h2>
-  <p class="muted small">What <code>systemctl --user status</code> shows for each unit. Read-only: nothing here starts or stops a service.</p>
+  <p class="muted small">What <code>systemctl --user status</code> shows for each unit. {% if actions %}Restart is refused while a service is busy; timers are never restarted.{% else %}Read-only: nothing here starts or stops a service.{% endif %}</p>
   <table>
-    <thead><tr><th>Unit</th><th>State</th><th>Since</th><th>PID</th><th>Memory</th><th>CPU</th><th>Restarts</th></tr></thead>
+    <thead><tr><th>Unit</th><th>State</th><th>Since</th><th>PID</th><th>Memory</th><th>CPU</th><th>Restarts</th>{% if actions %}<th></th>{% endif %}</tr></thead>
     <tbody>
     {% for u in d.units %}
     <tr>
@@ -20,9 +20,10 @@
       <td class="mono">{{ '%.0f MB'|format(u.memory_mb) if u.memory_mb is not none else '–' }}</td>
       <td class="mono">{{ (u.cpu_sec ~ ' s') if u.cpu_sec is not none else '–' }}</td>
       <td class="mono">{{ u.restarts }}</td>
+      {% if actions %}<td>{% if not u.is_timer and u.installed %}{{ action('Restart', '/action/service/restart', {'unit': u.unit}, 'Restart ' ~ u.unit ~ '? It is refused if the service is busy.') }}{% endif %}</td>{% endif %}
     </tr>
     {% if u.processes %}
-    <tr><td colspan="7">
+    <tr><td colspan="{{ 8 if actions else 7 }}">
       <div class="muted small">running now</div>
       <ul class="proc mono small">{% for p in u.processes %}<li><span class="muted">{{ p.pid }}</span> {{ more(p.args) }}</li>{% endfor %}</ul>
     </td></tr>

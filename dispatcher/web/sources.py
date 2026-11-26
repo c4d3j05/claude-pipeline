@@ -154,6 +154,15 @@ class Sources:
             self._cache[name] = (self.clock(), res)
             return res
 
+    def fresh(self, name: str) -> Result:
+        """Read a source now, ignoring (and refreshing) the cache; for checks before an action."""
+        if name not in self.NAMES:
+            raise KeyError(name)
+        with self._locks[name]:
+            res = self._read(name)
+            self._cache[name] = (self.clock(), res)
+            return res
+
     def all(self) -> dict[str, Result]:
         return {n: self.get(n) for n in self.NAMES}
 

@@ -203,6 +203,23 @@ def _count(v) -> int:
     return v if isinstance(v, int) and not isinstance(v, bool) else 0
 
 
+def question_options(q: dict) -> list[tuple[str, str]]:
+    """(letter, text) for an escalation question's `options`: A, B and C only. Accepts a list of
+    texts (in order) or of {letter, text} objects; anything else gives no buttons."""
+    items = q.get("options") if isinstance(q, dict) else None
+    if not isinstance(items, list):
+        return []
+    out = []
+    for i, o in enumerate(items):
+        if isinstance(o, dict):
+            letter, text = str(o.get("letter") or "").upper(), o.get("text") or o.get("label")
+        else:
+            letter, text = "ABC"[i] if i < 3 else "", o
+        if letter in ("A", "B", "C") and isinstance(text, str) and text.strip():
+            out.append((letter, text.strip()[:300]))
+    return out
+
+
 def lanes(ex: dict) -> list[dict]:
     """Rows for the Lanes table, in the order explorer gives them. [] hides the table."""
     items = ex.get("lanes")

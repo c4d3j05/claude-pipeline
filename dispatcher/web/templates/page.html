@@ -9,19 +9,20 @@
 </head>
 <body>
   <header class="top">
-    <div class="brand">Factory <span class="muted">read-only</span></div>
+    <div class="brand">Factory {% if not actions %}<span class="muted">read-only</span>{% endif %}</div>
     <nav class="tabs">
       {% for t in tabs %}
       <a href="/{{ '' if t == 'overview' else t }}" class="{{ 'active' if t == tab }}">{{ t|capitalize }}</a>
       {% endfor %}
     </nav>
   </header>
+  <div id="action-result"></div>
   <main id="section"
         hx-get="/section/{{ tab }}{{ query }}"
         hx-trigger="load, every {{ refresh }}s [!document.querySelector('#section details[open]')]"
         hx-swap="innerHTML">
     <p class="muted loading">Loading…</p>
   </main>
-  <footer class="muted">Refreshes every {{ refresh }} s (paused while a row is expanded) · nothing on this page changes anything</footer>
+  <footer class="muted">Refreshes every {{ refresh }} s (paused while a row is expanded) · {% if actions %}buttons act after a confirmation and are logged{% else %}nothing on this page changes anything{% endif %}</footer>
 </body>
 </html>

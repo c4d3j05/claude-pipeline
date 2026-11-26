@@ -25,6 +25,11 @@
   {% if text %}<details class="more"><summary title="click to show it all; click again to fold">{{ text }}</summary></details>{% endif %}
 {%- endmacro %}
 
+{% macro action(label, url, vals, confirm, title='') -%}
+  <button type="button" class="act" hx-post="{{ url }}" hx-vals='{{ vals|tojson }}' hx-confirm="{{ confirm }}"
+          hx-target="#action-result" hx-swap="innerHTML"{% if title %} title="{{ title }}"{% endif %}>{{ label }}</button>
+{%- endmacro %}
+
 {% macro link(url, text) -%}
   {% if url|url %}<a href="{{ url|url }}" target="_blank" rel="noopener">{{ text }}</a>{% else %}{{ text }}{% endif %}
 {%- endmacro %}

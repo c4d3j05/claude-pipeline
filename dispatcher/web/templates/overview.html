@@ -21,6 +21,23 @@
   {% endif %}
 </section>
 
+{% if actions %}
+<section class="card">
+  <h2>Recent actions</h2>
+  {% if recent %}
+  <table>
+    <thead><tr><th>When</th><th>Action</th><th>Target</th><th>Result</th><th>Message</th></tr></thead>
+    <tbody>
+    {% for r in recent %}
+    <tr><td class="muted small">{{ r.at|ago }}</td><td class="mono small">{{ r.action }}</td><td class="mono small">{{ r.target }}</td>
+        <td>{% if r.refused %}refused{% elif r.ok %}✓{% else %}✗{% endif %}</td><td class="small">{{ r.message }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="muted">Nothing done from this page yet.</p>{% endif %}
+</section>
+{% endif %}
+
 <section class="card">
   <h2>Spend today</h2>
   {% if spend %}

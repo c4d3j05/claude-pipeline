@@ -1,9 +1,11 @@
-"""The FastAPI app: GET routes only. A page is a shell whose section HTMX loads and refreshes.
+"""The FastAPI app. Pages are GET only; actions (when DASHBOARD_ACTIONS is on) are POST /action/...
+A page is a shell whose section HTMX loads and refreshes.
 
   /, /board, /pipeline, /planner, /explorer, /services   full pages (tabs)
   /section/<tab>                              the tab's content, polled every DASHBOARD_REFRESH_SEC
   /api/<source>.json                          a source as JSON (pipeline, board, planner, explorer)
   /healthz                                    liveness, for a monitor
+  POST /action/explorer/{run,answer,batch}, /action/pipeline/retry, /action/service/restart
 """
 
 from __future__ import annotations
@@ -11,13 +13,14 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ..config import Config
 from . import views
+from .actions import Actions, Result
 from .sources import Sources
 
 HERE = Path(__file__).parent
@@ -31,14 +34,16 @@ def safe_url(value) -> str:
     return v if v.startswith(("https://", "http://")) else ""
 
 
-def create_app(cfg: Config, sources: Sources | None = None) -> FastAPI:
+def create_app(cfg: Config, sources: Sources | None = None,
+               actions: Actions | None = None) -> FastAPI:
     app = FastAPI(title="claude-pipeline dashboard", docs_url=None, redoc_url=None, openapi_url=None)
     src = sources or Sources(cfg)
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     env = templates.env
     env.filters.update(ago=views.ago, until=views.until, money=views.money, url=safe_url,
-                       short=lambda v: str(v or "")[:7] or "-")
-    env.globals.update(refresh=cfg.dashboard_refresh_sec, tabs=TABS)
+                       short=lambda v: str(v or "")[:7] or "-", options=views.question_options)
+    acts = actions or Actions(cfg, src)
+    env.globals.update(refresh=cfg.dashboard_refresh_sec, tabs=TABS, actions=cfg.dashboard_actions)
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
     def page(request: Request, tab: str) -> HTMLResponse:
@@ -69,7 +74,8 @@ def create_app(cfg: Config, sources: Sources | None = None) -> FastAPI:
         if tab == "overview":
             results = src.all()
             ctx.update(results=results, health=views.health(results), spend=views.spend(results),
-                       alerts=views.alerts(results))
+                       alerts=views.alerts(results),
+                       recent=acts.recent(20) if cfg.dashboard_actions else [])
         else:
             name = "board" if tab == "board" else tab
             ctx["res"] = src.get(name)
@@ -79,6 +85,43 @@ def create_app(cfg: Config, sources: Sources | None = None) -> FastAPI:
                 ctx.update(findings=rows, counts=counts, state=state, filters=FINDING_FILTERS)
                 ctx["lanes"] = views.lanes(ctx["res"].data)
         return templates.TemplateResponse(request, f"{tab}.html", ctx)
+
+    # --- actions: POST only, 404 when DASHBOARD_ACTIONS is off ----------------------------------
+    def act(request: Request, name: str, target: str, fn) -> HTMLResponse:
+        if not cfg.dashboard_actions:
+            raise HTTPException(404)
+        try:
+            result = fn()
+        except Exception as e:  # noqa: BLE001 - an action never answers with a 500
+            result = Result(False, False, f"failed: {e}"[:300])
+        acts.log(request.client.host if request.client else "-", name, target, result)
+        return templates.TemplateResponse(request, "_action_result.html", {"result": result})
+
+    @app.post("/action/explorer/run", response_class=HTMLResponse)
+    def explorer_run(request: Request, lane: str = Form("")):
+        return act(request, "explorer/run", lane or "default", lambda: acts.explorer_run(lane or None))
+
+    @app.post("/action/explorer/answer", response_class=HTMLResponse)
+    def explorer_answer(request: Request, question: str = Form(""), letter: str = Form("")):
+        return act(request, "explorer/answer", f"{question} {letter}".strip(),
+                   lambda: acts.explorer_answer(question, letter))
+
+    @app.post("/action/explorer/batch", response_class=HTMLResponse)
+    def explorer_batch(request: Request, action: str = Form(""), batch: str = Form("")):
+        return act(request, f"explorer/batch/{action}"[:60], batch,
+                   lambda: acts.explorer_batch(action, batch))
+
+    @app.post("/action/pipeline/retry", response_class=HTMLResponse)
+    def pipeline_retry(request: Request, task: str = Form("")):
+        def go() -> Result:
+            if not task.isascii() or not task.isdigit():
+                return Result(False, True, "not a task id")
+            return acts.pipeline_retry(int(task))
+        return act(request, "pipeline/retry", task, go)
+
+    @app.post("/action/service/restart", response_class=HTMLResponse)
+    def service_restart(request: Request, unit: str = Form("")):
+        return act(request, "service/restart", unit, lambda: acts.restart(unit))
 
     @app.get("/{tab}", response_class=HTMLResponse)
     def tab_page(request: Request, tab: str):
