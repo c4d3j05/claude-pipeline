@@ -150,6 +150,9 @@ class Config:
     dashboard_planner_dir: str = ""    # claude-planner checkout on this host; empty = not shown
     dashboard_explorer_dir: str = ""   # explorer checkout on this host; empty = not shown
     dashboard_refresh_sec: int = 15
+    # Actions on the dashboard (run explorer now, answer, batches, retry, restart); false = read-only.
+    dashboard_actions: bool = True
+    dashboard_action_log: Path = Path("logs/dashboard-actions.jsonl")
     # systemd user units shown on the Services tab (read with `systemctl --user show` only)
     dashboard_units: tuple[str, ...] = DEFAULT_DASHBOARD_UNITS
 
@@ -230,6 +233,9 @@ def load(env_file: str | None = ".env") -> Config:
         dashboard_planner_dir=_str(src, "DASHBOARD_PLANNER_DIR"),
         dashboard_explorer_dir=_str(src, "DASHBOARD_EXPLORER_DIR"),
         dashboard_refresh_sec=max(5, _int(src, "DASHBOARD_REFRESH_SEC", 15)),
+        dashboard_actions=_str(src, "DASHBOARD_ACTIONS", "true").lower() in ("1", "true", "yes", "on"),
+        dashboard_action_log=Path(_str(src, "DASHBOARD_ACTION_LOG", "logs/dashboard-actions.jsonl"))
+        .expanduser(),
         dashboard_units=tuple(u.strip() for u in _str(src, "DASHBOARD_UNITS", ",".join(DEFAULT_DASHBOARD_UNITS))
                               .split(",") if u.strip()),
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),

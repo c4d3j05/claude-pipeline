@@ -17,6 +17,7 @@ dev = [
     "jinja2>=3.1.6",
     "pytest>=8.0",
     "pytest-cov>=7.1.0",
+    "python-multipart>=0.0.9",
     "ruff>=0.5",
 ]
 dashboard = [
@@ -25,6 +26,7 @@ dashboard = [
 web = [
     "fastapi>=0.165.0",
     "jinja2>=3.1.6",
+    "python-multipart>=0.0.9",
     "uvicorn>=0.54.0",
 ]
 
