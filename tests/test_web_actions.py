@@ -7,10 +7,12 @@ import json
 import subprocess
 
 import pytest
+from fastapi.testclient import TestClient
 
 from dispatcher import config as cfgmod
 from dispatcher import dashboard
 from dispatcher.web.actions import Actions
+from dispatcher.web.app import create_app
 from dispatcher.web.sources import Sources
 
 NOW = dt.datetime(2026, 11, 25, 20, 0, tzinfo=dt.UTC)
@@ -204,3 +206,79 @@ def test_log_never_raises(cfg, tmp_path):
     a, _ = make(c)
     a.log("ip", "x", "y", a.restart("sshd"))
     assert a.recent() == []
+
+
+# --- routes --------------------------------------------------------------------------------------
+def web(cfg, **kw):
+    a, run = make(cfg, **kw)
+    return TestClient(create_app(cfg, a.sources, a)), a, run
+
+
+def test_actions_off_hides_buttons_and_404s(cfg):
+    import dataclasses
+    off = dataclasses.replace(cfg, dashboard_actions=False)
+    a, run = make(off)
+    c = TestClient(create_app(off, a.sources, a))
+    for path, data in (("/action/explorer/run", {}), ("/action/explorer/answer", {"question": QID, "letter": "A"}),
+                       ("/action/explorer/batch", {"action": "send", "batch": "B-1"}),
+                       ("/action/pipeline/retry", {"task": "1"}), ("/action/service/restart", {"unit": "explorer-serve"})):
+        assert c.post(path, data=data).status_code == 404
+    assert not run.calls and not off.dashboard_action_log.exists()
+
+
+def test_actions_default_on_and_get_is_not_allowed(cfg):
+    assert cfg.dashboard_actions is True
+    c, _, _ = web(cfg)
+    assert c.get("/action/explorer/run").status_code in (404, 405)
+
+
+def test_routes_run_and_answer_and_batch(cfg):
+    c, _a, run = web(cfg, stdout="ok line\n")
+    r = c.post("/action/explorer/run", data={"lane": "global"})
+    assert r.status_code == 200 and "✓" in r.text and "ok line" in r.text and 'class="card note"' in r.text
+    assert run.calls[-1][0][4:] == ["request-run", "--global", "--by", "dashboard"]
+    c.post("/action/explorer/run")
+    assert run.calls[-1][0][4:] == ["request-run", "--by", "dashboard"]
+    c.post("/action/explorer/answer", data={"question": QID, "letter": "C"})
+    assert run.calls[-1][0][4:] == ["answer", QID, "C"]
+    c.post("/action/explorer/batch", data={"action": "hold", "batch": "B-4"})
+    assert run.calls[-1][0][4:] == ["batch", "hold", "B-4"]
+    n = len(run.calls)
+    r = c.post("/action/explorer/answer", data={"question": "q-1", "letter": "A"})
+    assert "✗" in r.text and 'class="card error"' in r.text
+    c.post("/action/explorer/answer")
+    c.post("/action/explorer/batch", data={"action": "rm", "batch": "B-4"})
+    assert len(run.calls) == n
+
+
+def test_route_html_is_escaped_and_failures_reported(cfg):
+    c, _, _ = web(cfg, rc=1, stderr="<b>bad</b>")
+    r = c.post("/action/explorer/run")
+    assert "&lt;b&gt;bad&lt;/b&gt;" in r.text and "✗" in r.text
+
+
+def test_route_retry_and_restart(cfg, monkeypatch):
+    monkeypatch.setattr(dashboard, "retry_task", lambda *a: "re-queued")
+    c, _a, run = web(cfg, rows={3: {"task_id": 3, "state": "blocked"}, 4: {"task_id": 4, "state": "working"}})
+    assert "#3 re-queued" in c.post("/action/pipeline/retry", data={"task": "3"}).text
+    assert "task 4 is working" in c.post("/action/pipeline/retry", data={"task": "4"}).text
+    for bad in ("x", "3; ls", "-1", "", "٣"):
+        assert "not a task id" in c.post("/action/pipeline/retry", data={"task": bad}).text
+    assert "restarting the dashboard" in c.post("/action/service/restart", data={"unit": "claude-pipeline-web"}).text
+    assert "unknown unit" in c.post("/action/service/restart", data={"unit": "explorer-nightly.timer"}).text
+    assert run.calls[-1][0][0] == "systemd-run"
+
+
+def test_route_restart_refused_while_busy(cfg):
+    c, _a, run = web(cfg, explorer={"run": {"id": "r9", "reason": "recheck"}})
+    r = c.post("/action/service/restart", data={"unit": "explorer-serve"})
+    assert "✗" in r.text and "explorer is running a recheck run (r9)" in r.text and not run.calls
+
+
+def test_routes_log_every_action_with_the_origin(cfg):
+    c, a, _ = web(cfg)
+    c.post("/action/explorer/run")
+    c.post("/action/service/restart", data={"unit": "sshd"})
+    rows = a.recent()
+    assert [x["action"] for x in rows] == ["service/restart", "explorer/run"]
+    assert rows[0]["refused"] and rows[0]["target"] == "sshd" and rows[0]["ip"]
