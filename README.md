@@ -149,7 +149,7 @@ through a `control` row / `cancel_requested` flag in the ledger that the daemon 
 
 ## Web dashboard
 
-A read-only page for the whole factory, so you can see what is going on without logging into the
+A page for the whole factory (read-only unless `DASHBOARD_ACTIONS` is on, see below), so you can see what is going on without logging into the
 host (OpenSpec change `web-dashboard`). One tab per area, each refreshed by HTMX every
 `DASHBOARD_REFRESH_SEC`:
 
@@ -160,14 +160,14 @@ host (OpenSpec change `web-dashboard`). One tab per area, each refreshed by HTMX
 | Pipeline | Busy workers (stage, elapsed, spend, last activity) and every ticket's history |
 | Planner | Open investigations and what was filed, with links to the Slack thread and the Vikunja tasks |
 | Explorer | UAT's commit, runs, findings filtered by state (including escalated), open and answered questions, batches and hotfixes, a Lanes table (focus, last and next run, today's spend against the lane's share, open findings) once explorer reports lanes |
-| Services | What `systemctl --user status` shows for every unit in `DASHBOARD_UNITS`: state, since when, PID, memory, CPU, restarts, timers' last and next run, and the processes running inside each one (a release test, a worker session). Read-only |
+| Services | What `systemctl --user status` shows for every unit in `DASHBOARD_UNITS`: state, since when, PID, memory, CPU, restarts, timers' last and next run, and the processes running inside each one (a release test, a worker session); Restart buttons when actions are on |
 
 ```bash
 uv sync --group web                 # once
 uv run claude-pipeline web          # http://DASHBOARD_HOST:DASHBOARD_PORT
 ```
 
-It never writes: the ledger and Vikunja are only read, and claude-planner and explorer are asked for
+Reading never writes: the ledger and Vikunja are only read by the pages, and claude-planner and explorer are asked for
 `status --json` (schema 1, in planner's integration spec) by running `uv run <cli> status --json` in
 `DASHBOARD_PLANNER_DIR` and `DASHBOARD_EXPLORER_DIR` on the same host. Each answer is reused for
 `DASHBOARD_REFRESH_SEC`, so open browsers do not multiply the work. A service that cannot be read
@@ -181,6 +181,33 @@ SSH tunnel. On Linux, `scripts/install.sh` installs `claude-pipeline-web.service
 ```bash
 systemctl --user enable --now claude-pipeline-web.service
 ```
+
+### Dashboard actions
+
+With `DASHBOARD_ACTIONS=true` (the default) the dashboard has buttons (OpenSpec change
+`dashboard-actions`). Each asks for confirmation in the browser, shows its outcome at the top of the
+page, and is appended to `DASHBOARD_ACTION_LOG` (default `logs/dashboard-actions.jsonl`: time, client
+address, action, target, result). The Overview tab lists the last 20. All of them are `POST /action/...`.
+
+| Where | Button | What it does |
+|---|---|---|
+| Explorer | Run now (per lane, plus Global run, once explorer reports lanes) | `explorer request-run [--global \| --lane <id>] --by dashboard`: explorer starts within a few minutes, after any run in progress. Needs explorer's `request-run` |
+| Explorer, open escalation questions | A / B / C | `explorer answer <question> <letter>`; the option text is the confirmation and the tooltip |
+| Explorer, batches | Send / Hold (state `veto`), Unhold (held) | `explorer batch send\|hold\|unhold <batch>` |
+| Pipeline, blocked tickets | Retry | The dashboard's existing retry: back to Ready, claimed again. Refused unless the ticket is `blocked` |
+| Services, each non-timer unit | Restart | `systemctl --user restart <unit>`. The web unit restarts itself 2 s later via `systemd-run`; reload the page |
+
+A restart is **refused, with the reason,** while the service is busy: `explorer-serve` with an active
+run, `claude-pipeline-dispatcher` with tickets building, `claude-planner` with an investigation
+provisioning, working or filing. If the busy state cannot be read, the restart is refused too. Timers
+and units outside `DASHBOARD_UNITS` are never restarted. Ids, letters, lanes and units are checked
+against fixed patterns or the unit list before anything runs, and commands are argument lists (no
+shell); no route runs an arbitrary command.
+
+**There is still no password.** Anyone who can reach the port can press these buttons, so keep the
+dashboard on the local network (or behind an SSH tunnel). Set `DASHBOARD_ACTIONS=false` to make it
+read-only again: the buttons disappear and every `/action/...` answers 404. Forms need
+`python-multipart` (in the `web` group: `uv sync --group web`).
 
 ## Authoring tasks
 
