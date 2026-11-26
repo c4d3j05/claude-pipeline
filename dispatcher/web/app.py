@@ -41,7 +41,7 @@ def create_app(cfg: Config, sources: Sources | None = None,
     templates = Jinja2Templates(directory=str(HERE / "templates"))
     env = templates.env
     env.filters.update(ago=views.ago, until=views.until, money=views.money, url=safe_url,
-                       short=lambda v: str(v or "")[:7] or "-")
+                       short=lambda v: str(v or "")[:7] or "-", options=views.question_options)
     acts = actions or Actions(cfg, src)
     env.globals.update(refresh=cfg.dashboard_refresh_sec, tabs=TABS, actions=cfg.dashboard_actions)
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
@@ -74,7 +74,8 @@ def create_app(cfg: Config, sources: Sources | None = None,
         if tab == "overview":
             results = src.all()
             ctx.update(results=results, health=views.health(results), spend=views.spend(results),
-                       alerts=views.alerts(results))
+                       alerts=views.alerts(results),
+                       recent=acts.recent(20) if cfg.dashboard_actions else [])
         else:
             name = "board" if tab == "board" else tab
             ctx["res"] = src.get(name)

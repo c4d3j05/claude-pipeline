@@ -1,4 +1,4 @@
-{% from "_macros.html" import unavailable, badge, link, more %}
+{% from "_macros.html" import unavailable, badge, link, more, action %}
 {% if not res.ok %}{{ unavailable(res) }}{% else %}
 {% set d = res.data %}
 {% set active = d.tasks|selectattr('state', 'in', ['claimed', 'working', 'testing', 'reviewing'])|list %}
@@ -31,7 +31,7 @@
     <thead><tr><th>Task</th><th>State</th><th>Spent</th><th>PR</th><th>Started</th><th>Updated</th></tr></thead>
     <tbody>
     {% for t in d.tasks[:100] %}
-    <tr><td>{{ link(t.url, '#' ~ t.task_id) }} <span class="muted small">{{ t.slug }}</span></td><td>{{ badge(t.state) }}</td>
+    <tr><td>{{ link(t.url, '#' ~ t.task_id) }} <span class="muted small">{{ t.slug }}</span></td><td>{{ badge(t.state) }}{% if actions and t.state == 'blocked' %} {{ action('Retry', '/action/pipeline/retry', {'task': t.task_id|string}, 'Retry #' ~ t.task_id ~ '? It goes back to Ready and is claimed again.') }}{% endif %}</td>
         <td class="mono">{{ t.cost|money }}</td><td>{% if t.pr_url %}{{ link(t.pr_url, '#' ~ t.pr_url.rsplit('/', 1)[-1]) }}{% endif %}</td>
         <td class="muted small">{{ t.started_at|ago }}</td><td class="muted small">{{ t.updated_at|ago }}</td></tr>
     {% endfor %}

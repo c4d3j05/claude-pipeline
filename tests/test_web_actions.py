@@ -282,3 +282,82 @@ def test_routes_log_every_action_with_the_origin(cfg):
     rows = a.recent()
     assert [x["action"] for x in rows] == ["service/restart", "explorer/run"]
     assert rows[0]["refused"] and rows[0]["target"] == "sshd" and rows[0]["ip"]
+
+
+# --- buttons and the Recent actions card ---------------------------------------------------------
+EXPL = {
+    "schema": 1, "service": "explorer", "uat": {}, "spend_today_usd": 1.0, "daily_cap_usd": 50, "run": None, "active_run": None, "findings": {"items": []},
+    "questions": {"open": [
+        {"id": QID, "kind": "escalation", "question": "What now?", "route": "billing",
+         "asked": "2026-11-25T18:00:00+00:00", "options": ["Fix it", "Leave it", "Drop it"]},
+        {"id": "q-aaaaaaaaaaaa", "kind": "info", "question": "FYI", "options": ["x"]}]},
+    "batches": [{"id": "B-7", "state": "veto", "findings": 2}, {"id": "B-8", "state": "held", "findings": 1},
+                {"id": "B-9", "state": "sent", "findings": 1}],
+}
+PIPE = {"paused": False, "today_cost": 1.0, "cap": 50.0, "max_workers": 2, "active": 0,
+        "tasks": [{"task_id": 6, "slug": "t-6", "state": "blocked", "cost": 1, "retries": "0/0", "pr_url": "",
+                   "elapsed": "-", "activity": "", "started_at": None, "updated_at": None, "url": ""},
+                  {"task_id": 7, "slug": "t-7", "state": "working", "cost": 1, "retries": "0/0", "pr_url": "",
+                   "elapsed": "-", "activity": "", "started_at": None, "updated_at": None, "url": ""}]}
+SERVICES = {"available": True, "units": [
+    {"unit": u, "description": "", "installed": True, "enabled": "enabled", "active": "active", "sub": "running",
+     "result": "", "since": None, "main_pid": 1, "memory_mb": 1.0, "cpu_sec": 1, "restarts": 0,
+     "is_timer": u.endswith(".timer"), "last_run": None, "next_run": None, "processes": []}
+    for u in UNITS.split(",")]}
+
+
+def page_client(cfg, explorer=None, enabled=True):
+    import dataclasses
+    c = dataclasses.replace(cfg, dashboard_actions=enabled)
+    readers = {"pipeline": lambda: PIPE, "board": lambda: {"buckets": [], "releases": []},
+               "planner": lambda: {"investigations": []}, "explorer": lambda: explorer or EXPL,
+               "services": lambda: SERVICES}
+    a = Actions(c, Sources(c, readers=readers), run=Runner(), ledger_factory=lambda: FakeLedger(), now=lambda: NOW)
+    return TestClient(create_app(c, a.sources, a)), a
+
+
+def test_buttons_appear_only_with_actions_on(cfg):
+    on, _ = page_client(cfg)
+    off, _ = page_client(cfg, enabled=False)
+    for tab in ("explorer", "pipeline", "services", "overview"):
+        assert "hx-post" in on.get(f"/section/{tab}").text or tab == "overview"
+        assert "hx-post" not in off.get(f"/section/{tab}").text
+    assert 'id="action-result"' in on.get("/").text and "read-only" not in on.get("/").text
+    assert "Recent actions" not in off.get("/section/overview").text
+    assert "Recent actions" in on.get("/section/overview").text
+
+
+def test_explorer_buttons(cfg):
+    t = page_client(cfg)[0].get("/section/explorer").text
+    assert "Ask explorer to run now? It starts within a few minutes, after any run in progress." in t
+    assert t.count("/action/explorer/answer") == 3        # the info question gets none
+    assert "Answer q-0123456789ab with B: Leave it?" in t and 'title="Drop it"' in t
+    assert "Send B-7 to the planner now?" in t and ">Hold<" in t and ">Unhold<" in t
+    assert t.count(">Send<") == 1 and t.count(">Unhold<") == 1
+
+
+def test_explorer_lane_buttons(cfg):
+    ex = {**EXPL, "lanes": [{"lane": "billing", "spent_today": 1, "budget": 5}]}
+    t = page_client(cfg, explorer=ex)[0].get("/section/explorer").text
+    assert "Ask explorer to run lane billing now?" in t and "Global run" in t and "&#34;lane&#34;" not in t
+
+
+def test_pipeline_and_services_buttons(cfg):
+    c, _ = page_client(cfg)
+    t = c.get("/section/pipeline").text
+    assert t.count(">Retry<") == 1 and "Retry #6? It goes back to Ready and is claimed again." in t
+    s = c.get("/section/services").text
+    assert s.count(">Restart<") == 4 and "Restart explorer-serve? It is refused if the service is busy." in s
+    assert "Restart explorer-nightly.timer" not in s
+
+
+def test_every_action_is_logged_and_shown_on_overview(cfg):
+    c, _ = page_client(cfg)
+    c.post("/action/explorer/run")
+    c.post("/action/service/restart", data={"unit": "sshd"})
+    with cfg.dashboard_action_log.open("a") as f:
+        f.write("{broken\n")
+    t = c.get("/section/overview").text
+    assert "Recent actions" in t and "explorer/run" in t and "service/restart" in t
+    assert "refused" in t and "unknown unit" in t and "✓" in t
+    assert t.index("service/restart") < t.index("explorer/run")       # newest first

@@ -1,8 +1,20 @@
-{% from "_macros.html" import unavailable, badge, link %}
+{% from "_macros.html" import unavailable, badge, link, action %}
 {% if not res.ok %}{{ unavailable(res) }}{% else %}
 {% set d = res.data %}
 {% set uat = (d.uat or {}) %}
 {% set q = (d.questions or {}) %}
+{% set run_note = ' It starts within a few minutes, after any run in progress.' %}
+{% if actions %}
+<section class="card row">
+  <strong>Run now</strong>
+  {% if lanes %}
+  {% for l in lanes %}{{ action(l.lane, '/action/explorer/run', {'lane': l.lane}, 'Ask explorer to run lane ' ~ l.lane ~ ' now?' ~ run_note) }}{% endfor %}
+  {{ action('Global run', '/action/explorer/run', {'lane': 'global'}, 'Ask explorer to run a global run now?' ~ run_note) }}
+  {% else %}
+  {{ action('Run now', '/action/explorer/run', {}, 'Ask explorer to run now?' ~ run_note) }}
+  {% endif %}
+</section>
+{% endif %}
 <section class="grid cols-3">
   <div class="card stat"><div class="muted">UAT runs</div><div class="big mono">{{ uat.commit|short }}</div>
     <div class="muted small">{% if uat.main_head and uat.main_head != uat.commit %}main is at {{ uat.main_head|short }}{% else %}level with main{% endif %} · tick {{ uat.last_tick|ago }}</div></div>
@@ -52,7 +64,8 @@
     <h2>Open questions <span class="count">{{ (q.open or [])|length }}</span></h2>
     {% for x in q.open or [] %}
     <div class="question">{% if x.kind == 'escalation' %}<span class="label hot">escalation</span>{% endif %} {{ link(x.permalink, x.question) }}
-      <div class="muted small">{{ x.route or '' }} · asked {{ x.asked|ago }}</div></div>
+      <div class="muted small">{{ x.route or '' }} · asked {{ x.asked|ago }}</div>
+      {% if actions and x.kind == 'escalation' %}<div class="row">{% for letter, text in x|options %}{{ action(letter, '/action/explorer/answer', {'question': x.id, 'letter': letter}, 'Answer ' ~ x.id ~ ' with ' ~ letter ~ ': ' ~ text ~ '?', text) }}{% endfor %}</div>{% endif %}</div>
     {% else %}<p class="muted">None.</p>{% endfor %}
   </div>
   <div class="card">
@@ -68,6 +81,10 @@
     <h2>Batches</h2>
     {% for b in d.batches or [] %}
     <div class="filed"><div class="row between"><span class="mono">{{ b.id }}</span>{{ badge(b.state) }}</div>
+      {% if actions %}<div class="row">
+        {% if b.state == 'veto' %}{{ action('Send', '/action/explorer/batch', {'action': 'send', 'batch': b.id}, 'Send ' ~ b.id ~ ' to the planner now?') }}{{ action('Hold', '/action/explorer/batch', {'action': 'hold', 'batch': b.id}, 'Hold ' ~ b.id ~ '? It is not sent until you unhold it.') }}
+        {% elif b.state == 'held' %}{{ action('Unhold', '/action/explorer/batch', {'action': 'unhold', 'batch': b.id}, 'Unhold ' ~ b.id ~ '? It goes back to the veto window.') }}{% endif %}
+      </div>{% endif %}
       <div class="muted small">{{ b.findings }} finding(s){% if b.release %} · {{ b.release }}{% endif %}{% if b.sent %} · sent {{ b.sent|ago }}{% endif %}{% if b.resends %} · resent {{ b.resends }}×{% endif %}</div>
       {% if b.events %}<ul class="plain small muted">{% for e in b.events[-3:] %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}</div>
     {% else %}<p class="muted">No batches.</p>{% endfor %}
