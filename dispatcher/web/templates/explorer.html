@@ -82,8 +82,10 @@
     {% for b in d.batches or [] %}
     <div class="filed"><div class="row between"><span class="mono">{{ b.id }}</span>{{ badge(b.state) }}</div>
       {% if actions %}<div class="row">
-        {% if b.state == 'veto' %}{{ action('Send', '/action/explorer/batch', {'action': 'send', 'batch': b.id}, 'Send ' ~ b.id ~ ' to the planner now?') }}{{ action('Hold', '/action/explorer/batch', {'action': 'hold', 'batch': b.id}, 'Hold ' ~ b.id ~ '? It is not sent until you unhold it.') }}
-        {% elif b.state == 'held' %}{{ action('Unhold', '/action/explorer/batch', {'action': 'unhold', 'batch': b.id}, 'Unhold ' ~ b.id ~ '? It goes back to the veto window.') }}{% endif %}
+        {# explorer marks a held batch with `held` and keeps its state (closed or veto) #}
+        {% if b.held and b.state in ('closed', 'veto') %}{{ action('Unhold', '/action/explorer/batch', {'action': 'unhold', 'batch': b.id}, 'Unhold ' ~ b.id ~ '? It goes back to the veto window.') }}
+        {% elif b.state == 'veto' %}{{ action('Send', '/action/explorer/batch', {'action': 'send', 'batch': b.id}, 'Send ' ~ b.id ~ ' to the planner now?') }}{{ action('Hold', '/action/explorer/batch', {'action': 'hold', 'batch': b.id}, 'Hold ' ~ b.id ~ '? It is not sent until you unhold it.') }}
+        {% elif b.state == 'closed' %}{{ action('Hold', '/action/explorer/batch', {'action': 'hold', 'batch': b.id}, 'Hold ' ~ b.id ~ '? It is not sent until you unhold it.') }}{% endif %}
       </div>{% endif %}
       <div class="muted small">{{ b.findings }} finding(s){% if b.release %} · {{ b.release }}{% endif %}{% if b.sent %} · sent {{ b.sent|ago }}{% endif %}{% if b.resends %} · resent {{ b.resends }}×{% endif %}</div>
       {% if b.events %}<ul class="plain small muted">{% for e in b.events[-3:] %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}</div>

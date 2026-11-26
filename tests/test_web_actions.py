@@ -291,7 +291,7 @@ EXPL = {
         {"id": QID, "kind": "escalation", "question": "What now?", "route": "billing",
          "asked": "2026-11-25T18:00:00+00:00", "options": ["Fix it", "Leave it", "Drop it"]},
         {"id": "q-aaaaaaaaaaaa", "kind": "info", "question": "FYI", "options": ["x"]}]},
-    "batches": [{"id": "B-7", "state": "veto", "findings": 2}, {"id": "B-8", "state": "held", "findings": 1},
+    "batches": [{"id": "B-7", "state": "veto", "findings": 2}, {"id": "B-8", "state": "veto", "held": True, "findings": 1},
                 {"id": "B-9", "state": "sent", "findings": 1}],
 }
 PIPE = {"paused": False, "today_cost": 1.0, "cap": 50.0, "max_workers": 2, "active": 0,
