@@ -209,6 +209,21 @@ dashboard on the local network (or behind an SSH tunnel). Set `DASHBOARD_ACTIONS
 read-only again: the buttons disappear and every `/action/...` answers 404. Forms need
 `python-multipart` (in the `web` group: `uv sync --group web`).
 
+### Dashboard settings
+
+The Settings tab (OpenSpec change `dashboard-settings`) edits a fixed allow-list of operational settings
+in three `.env` files: this repo's, planner's (`DASHBOARD_PLANNER_DIR/.env`) and explorer's
+(`DASHBOARD_EXPLORER_DIR/.env`). Each row shows the current value (or `default (<code default>)`), a help
+line and whether a change applies now (the pipeline's hot-reloaded settings) or needs a restart of a named
+unit. Saving asks for confirmation, checks the kind, range and caps (for example a lane's daily cap may not
+exceed the daily cap), copies the file to `.env.bak-YYYYMMDDHHMMSS` next to it (the newest 10 are kept),
+rewrites only that one line (or appends it) atomically, logs `settings/save` in the action log, and offers
+the Restart button when one is needed. A service whose checkout is not configured shows "not configured";
+with `DASHBOARD_ACTIONS=false` the tab is read-only and the POST answers 404.
+
+**Never secrets.** Only the allow-listed keys are read, shown, written or logged; tokens, passwords and
+webhooks in those files are skipped by the parser and cannot be saved through the dashboard.
+
 ## Authoring tasks
 
 How to scope and structure tasks so a batch runs in parallel safely (conflicts surface at
