@@ -1,1 +1,3 @@
-<div class="card {{ 'note' if result.ok else 'error' }}">{{ '✓' if result.ok else '✗' }} {{ result.message }}</div>
+{% from "_macros.html" import action %}
+<div class="card {{ 'note' if result.ok else 'error' }}">{{ '✓' if result.ok else '✗' }} {{ result.message }}
+  {% if result.ok and restart %} {{ action('Restart ' ~ restart, '/action/service/restart', {'unit': restart}, 'Restart ' ~ restart ~ '? It is refused if the service is busy.') }}{% endif %}</div>

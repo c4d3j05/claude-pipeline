@@ -21,7 +21,7 @@ from .. import dashboard
 from ..config import Config
 from ..db import Ledger
 from ..log import get
-from . import views
+from . import settings, views
 from .sources import Sources
 
 log = get("web")
@@ -189,6 +189,26 @@ class Actions:
                 if str(i.get("state") or "").lower() in PLANNER_BUSY:
                     return f"planner is working on {i.get('id')}"
         return None
+
+    # --- settings -----------------------------------------------------------------------------
+    def save_setting(self, service: str, key: str, value: str) -> Result:
+        """Change one allow-listed setting of a service's .env (see web/settings.py)."""
+        setting = settings.find(service, key)
+        if setting is None:
+            return refuse("not a setting that can be changed here")
+        if settings.path_of(self.cfg, service) is None:
+            return refuse(f"{service} is not configured")
+        error = settings.validate(service, key, value, settings.read(self.cfg, service))
+        if error:
+            return refuse(error)
+        try:
+            settings.write(self.cfg, service, key, value, self.now())
+        except (OSError, ValueError) as e:
+            return failed(f"failed: {e}"[:300])
+        shown = f"{key}={settings.normalize(service, key, value)}"
+        if setting.restart:
+            return done(f"{shown} saved; restart {setting.restart} to apply")
+        return done(f"{shown} saved; applies now")
 
     # --- the action log -----------------------------------------------------------------------
     def log(self, request_ip: str, action: str, target: str, result: Result) -> None:

@@ -33,7 +33,8 @@ def cfg(tmp_path):
     (plan / ".env").write_text(f"SLACK_BOT_TOKEN={SECRET}\nTHREAD_CAP_USD=4\n")
     env = tmp_path / ".env"
     env.write_text(f"VIKUNJA_API_TOKEN={SECRET}\nMAX_WORKERS=3\nDASHBOARD_PLANNER_DIR={plan}\n"
-                   f"DASHBOARD_EXPLORER_DIR={expl}\nPIPELINE_DB={tmp_path / 'p.db'}\n")
+                   f"DASHBOARD_EXPLORER_DIR={expl}\nPIPELINE_DB={tmp_path / 'p.db'}\n"
+                   f"DASHBOARD_ACTION_LOG={tmp_path / 'actions.jsonl'}\n")
     return cfgmod.load(str(env))
 
 
@@ -126,3 +127,116 @@ def test_write_refuses_before_touching_any_file(cfg, tmp_path):
             settings.write(cfg, service, key, value, NOW)
     assert path.read_text() == EXPLORER_ENV
     assert not list(path.parent.glob(".env.bak-*"))
+
+
+# --- routes and page ----------------------------------------------------------------------------
+import json
+
+from fastapi.testclient import TestClient
+
+from dispatcher.web.actions import Actions
+from dispatcher.web.app import create_app
+from dispatcher.web.sources import Sources
+
+
+def make_client(cfg, log_path=None):
+    readers = {"pipeline": lambda: {"tasks": []}, "board": lambda: {"buckets": [], "releases": []},
+               "planner": lambda: {"investigations": []}, "explorer": lambda: {"run": None}}
+    sources = Sources(cfg, readers=readers)
+    acts = Actions(cfg, sources, now=lambda: NOW)
+    return TestClient(create_app(cfg, sources, acts))
+
+
+def with_cfg(cfg, **kw):
+    import dataclasses
+    return dataclasses.replace(cfg, **kw)
+
+
+def log_lines(cfg):
+    return [json.loads(x) for x in cfg.dashboard_action_log.read_text().splitlines()]
+
+
+def test_page_lists_settings_and_never_a_secret(cfg, tmp_path):
+    c = make_client(cfg)
+    assert "settings" in cfg_tabs()
+    bodies = [c.get("/settings").text, c.get("/section/settings").text]
+    html = bodies[1]
+    for body in bodies:
+        assert SECRET not in body and "hunter2" not in body and "SLACK_BOT_TOKEN" not in body
+    assert "RECHECK_WALL_CLOCK_MIN" in html and "default (10)" in html      # RUN_CAP_USD unset
+    assert "restart explorer-serve" in html and "applies now" in html
+    assert "Save" in html and 'name="value"' in html
+
+
+def cfg_tabs():
+    from dispatcher.web.app import TABS
+    return TABS
+
+
+def test_save_route_logs_and_reports_restart(cfg, tmp_path):
+    c = make_client(cfg)
+    r = c.post("/action/settings/save", data={"service": "explorer",
+                                              "key": "RECHECK_WALL_CLOCK_MIN", "value": "25"})
+    assert r.status_code == 200
+    assert "RECHECK_WALL_CLOCK_MIN=25 saved; restart explorer-serve to apply" in r.text
+    assert "Restart explorer-serve" in r.text and "/action/service/restart" in r.text
+    env = (tmp_path / "explorer" / ".env").read_text()
+    assert "RECHECK_WALL_CLOCK_MIN=25\n" in env and SECRET in env
+    assert list((tmp_path / "explorer").glob(".env.bak-*"))
+    (entry,) = log_lines(cfg)
+    assert (entry["action"], entry["target"], entry["ok"]) == \
+        ("settings/save", "explorer:RECHECK_WALL_CLOCK_MIN", True)
+    assert entry["message"] == "RECHECK_WALL_CLOCK_MIN=25 saved; restart explorer-serve to apply"
+    assert SECRET not in cfg.dashboard_action_log.read_text() and SECRET not in r.text
+    # a refused value says why and is logged as refused
+    r = c.post("/action/settings/save", data={"service": "explorer",
+                                              "key": "RECHECK_WALL_CLOCK_MIN", "value": "99"})
+    assert "RECHECK_WALL_CLOCK_MIN must be between 3 and 60" in r.text and "Restart" not in r.text
+    assert log_lines(cfg)[-1]["refused"] is True
+
+
+def test_save_route_hot_setting_applies_now(cfg, tmp_path):
+    c = make_client(cfg)
+    r = c.post("/action/settings/save", data={"service": "pipeline", "key": "MAX_WORKERS",
+                                              "value": "4"})
+    assert "MAX_WORKERS=4 saved; applies now" in r.text and "Restart" not in r.text
+    assert "MAX_WORKERS=4\n" in (tmp_path / ".env").read_text()
+    assert cfgmod.load(cfg.env_file).max_workers == 4
+    assert log_lines(cfg)[-1]["message"] == "MAX_WORKERS=4 saved; applies now"
+
+
+def test_unknown_key_or_service_is_refused_without_touching_the_file(cfg, tmp_path):
+    c = make_client(cfg)
+    before = {p: p.read_bytes() for p in tmp_path.rglob(".env")}
+    for service, key in [("explorer", "SLACK_BOT_TOKEN"), ("pipeline", "VIKUNJA_API_TOKEN"),
+                         ("planner", "PATH"), ("root", "MAX_WORKERS"), ("", "")]:
+        r = c.post("/action/settings/save", data={"service": service, "key": key, "value": "1"})
+        assert r.status_code == 200 and "not a setting" in r.text
+    assert {p: p.read_bytes() for p in tmp_path.rglob(".env")} == before
+    assert not list(tmp_path.rglob(".env.bak-*"))
+    assert all(e["target"] == "unknown" and e["refused"] for e in log_lines(cfg))
+    assert SECRET not in cfg.dashboard_action_log.read_text()
+
+
+def test_actions_off_settings_are_read_only(cfg, tmp_path):
+    off = with_cfg(cfg, dashboard_actions=False)
+    c = make_client(off)
+    html = c.get("/section/settings").text
+    assert "RECHECK_WALL_CLOCK_MIN" in html and "Save" not in html and "<form" not in html
+    assert SECRET not in html
+    before = (tmp_path / "explorer" / ".env").read_text()
+    r = c.post("/action/settings/save", data={"service": "explorer",
+                                              "key": "RECHECK_WALL_CLOCK_MIN", "value": "25"})
+    assert r.status_code == 404
+    assert (tmp_path / "explorer" / ".env").read_text() == before
+
+
+def test_unconfigured_service_shows_not_configured(cfg, tmp_path):
+    bare = with_cfg(cfg, dashboard_planner_dir="", dashboard_explorer_dir=str(tmp_path / "gone"))
+    c = make_client(bare)
+    html = c.get("/section/settings").text
+    assert html.count("not configured") == 2
+    assert "MAX_INVESTIGATIONS" not in html and "MAX_WORKERS" in html
+    r = c.post("/action/settings/save", data={"service": "planner", "key": "MAX_INVESTIGATIONS",
+                                              "value": "2"})
+    assert "planner is not configured" in r.text
