@@ -1,0 +1,46 @@
+{% from "_macros.html" import badge %}
+<p class="muted small">Operational settings only: a fixed list per service, each checked before it is written to that service's <code>.env</code> (a backup is kept next to it). Nothing else in those files is read or shown. {% if actions %}Saving asks for confirmation and is logged.{% else %}Read-only: <code>DASHBOARD_ACTIONS</code> is off.{% endif %}</p>
+{% for c in cards %}
+<section class="card">
+  <h2>{{ c.service|capitalize }}</h2>
+  {% if not c.configured %}
+  <p class="muted">not configured{% if c.service != 'pipeline' %} (set <code>DASHBOARD_{{ c.service|upper }}_DIR</code> to a checkout with a <code>.env</code>){% endif %}</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Setting</th><th>Value</th><th>Help</th><th>Applies</th>{% if actions %}<th></th>{% endif %}</tr></thead>
+    <tbody>
+    {% for r in c.rows %}{% set s = r.s %}
+    <tr>
+      <td class="mono">{{ s.key }}</td>
+      <td class="mono">{% if r.value is none %}<span class="muted">default ({{ s.default }})</span>{% else %}{{ r.value }}{% endif %}</td>
+      <td class="muted small">{{ s.help }}{% if s.min is not none or s.max is not none %} <span class="mono">({% if s.min is not none %}{{ '%g'|format(s.min) }}{% endif %}..{% if s.max is not none %}{{ '%g'|format(s.max) }}{% endif %})</span>{% endif %}</td>
+      <td>{% if s.restart %}<span class="badge">restart {{ s.restart }}</span>{% else %}<span class="badge s-done">applies now</span>{% endif %}</td>
+      {% if actions %}
+      <td>
+        <form hx-post="/action/settings/save" hx-target="#action-result" hx-swap="innerHTML"
+              hx-on::confirm='if(!confirm({{ ("Set " ~ s.key ~ "=")|tojson }} + this.elements["value"].value + {{ (" in " ~ c.service ~ "'s .env? " ~ ("it applies after restarting " ~ s.restart if s.restart else "applies now"))|tojson }})) event.preventDefault()'>
+          <input type="hidden" name="service" value="{{ c.service }}">
+          <input type="hidden" name="key" value="{{ s.key }}">
+          {% set cur = r.value if r.value is not none else s.default %}
+          {% if s.kind == 'bool' %}
+          <select name="value">
+            <option value="true"{% if cur|lower in ('true', '1', 'yes') %} selected{% endif %}>true</option>
+            <option value="false"{% if cur|lower not in ('true', '1', 'yes') %} selected{% endif %}>false</option>
+          </select>
+          {% else %}
+          <input type="number" name="value" value="{{ cur }}" class="mono"
+                 {% if s.min is not none %}min="{{ '%g'|format(s.min) }}"{% endif %}
+                 {% if s.max is not none %}max="{{ '%g'|format(s.max) }}"{% endif %}
+                 step="{{ '1' if s.kind == 'int' else 'any' }}" required>
+          {% endif %}
+          <button type="submit" class="act">Save</button>
+        </form>
+      </td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endfor %}

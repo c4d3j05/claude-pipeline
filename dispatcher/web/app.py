@@ -1,11 +1,11 @@
 """The FastAPI app. Pages are GET only; actions (when DASHBOARD_ACTIONS is on) are POST /action/...
 A page is a shell whose section HTMX loads and refreshes.
 
-  /, /board, /pipeline, /planner, /explorer, /services   full pages (tabs)
+  /, /board, /pipeline, /planner, /explorer, /services, /settings   full pages (tabs)
   /section/<tab>                              the tab's content, polled every DASHBOARD_REFRESH_SEC
   /api/<source>.json                          a source as JSON (pipeline, board, planner, explorer)
   /healthz                                    liveness, for a monitor
-  POST /action/explorer/{run,answer,batch}, /action/pipeline/retry, /action/service/restart
+  POST /action/explorer/{run,answer,batch}, /action/pipeline/retry, /action/service/restart, /action/settings/save
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ..config import Config
-from . import views
+from . import settings, views
 from .actions import Actions, Result
 from .sources import Sources
 
 HERE = Path(__file__).parent
-TABS = ("overview", "board", "pipeline", "planner", "explorer", "services")
+TABS = ("overview", "board", "pipeline", "planner", "explorer", "services", "settings")
 FINDING_FILTERS = ("open", "escalated", "fix_pending", "fix_merged", "resolved", "dismissed", "all")
 
 
@@ -66,6 +66,15 @@ def create_app(cfg: Config, sources: Sources | None = None,
         return JSONResponse({"source": name, "configured": r.configured, "ok": r.ok, "error": r.error,
                              "fetched_at": r.fetched_at, "data": r.data})
 
+    def settings_cards() -> list[dict]:
+        cards = []
+        for service, items in settings.ALLOWED.items():
+            configured = settings.path_of(cfg, service) is not None
+            current = settings.read(cfg, service) if configured else {}
+            rows = [{"s": s, "value": current.get(s.key)} for s in items]
+            cards.append({"service": service, "configured": configured, "rows": rows})
+        return cards
+
     @app.get("/section/{tab}", response_class=HTMLResponse)
     def section(request: Request, tab: str, state: str = "open"):
         if tab not in TABS:
@@ -76,6 +85,8 @@ def create_app(cfg: Config, sources: Sources | None = None,
             ctx.update(results=results, health=views.health(results), spend=views.spend(results),
                        alerts=views.alerts(results),
                        recent=acts.recent(20) if cfg.dashboard_actions else [])
+        elif tab == "settings":
+            ctx["cards"] = settings_cards()
         else:
             name = "board" if tab == "board" else tab
             ctx["res"] = src.get(name)
@@ -87,7 +98,7 @@ def create_app(cfg: Config, sources: Sources | None = None,
         return templates.TemplateResponse(request, f"{tab}.html", ctx)
 
     # --- actions: POST only, 404 when DASHBOARD_ACTIONS is off ----------------------------------
-    def act(request: Request, name: str, target: str, fn) -> HTMLResponse:
+    def act(request: Request, name: str, target: str, fn, extra: dict | None = None) -> HTMLResponse:
         if not cfg.dashboard_actions:
             raise HTTPException(404)
         try:
@@ -95,7 +106,7 @@ def create_app(cfg: Config, sources: Sources | None = None,
         except Exception as e:  # noqa: BLE001 - an action never answers with a 500
             result = Result(False, False, f"failed: {e}"[:300])
         acts.log(request.client.host if request.client else "-", name, target, result)
-        return templates.TemplateResponse(request, "_action_result.html", {"result": result})
+        return templates.TemplateResponse(request, "_action_result.html", {"result": result, **(extra or {})})
 
     @app.post("/action/explorer/run", response_class=HTMLResponse)
     def explorer_run(request: Request, lane: str = Form("")):
@@ -122,6 +133,15 @@ def create_app(cfg: Config, sources: Sources | None = None,
     @app.post("/action/service/restart", response_class=HTMLResponse)
     def service_restart(request: Request, unit: str = Form("")):
         return act(request, "service/restart", unit, lambda: acts.restart(unit))
+
+    @app.post("/action/settings/save", response_class=HTMLResponse)
+    def settings_save(request: Request, service: str = Form(""), key: str = Form(""),
+                      value: str = Form("")):
+        known = settings.find(service, key)
+        target = f"{service}:{key}" if known else "unknown"
+        extra = {"restart": known.restart if known else None}
+        return act(request, "settings/save", target,
+                   lambda: acts.save_setting(service, key, value), extra)
 
     @app.get("/{tab}", response_class=HTMLResponse)
     def tab_page(request: Request, tab: str):
