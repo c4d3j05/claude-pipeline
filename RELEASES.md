@@ -11,7 +11,9 @@ The owner decided on 2026-11-22:
 - releases are verified by explorer on UAT *after* they merge, and the pipeline itself merges the
   release PR into main, with a merge commit, behind `RELEASE_MERGE_TO_MAIN`.
 
-Both are off by default; with them off, a human merges and everything else works the same. A ticket
+Both are off when unset (the code default), and with them off a human merges and everything else
+works the same. **This deployment runs with both on** (the owner's decision above), which is what
+`.env.example` shows. A ticket
 PR into main (a DM ticket, a hotfix) is never merged by the pipeline. `spec.md` is the owner's to
 update.
 
@@ -71,13 +73,13 @@ next merged into the release branch. A release ticket still waits for main work 
 
 ## Settings
 
-| Setting | Default | Meaning |
-|---|---|---|
-| `RELEASE_AUTO_MERGE` | `false` | Merge a release ticket's PR into its release branch once its gates pass. |
-| `RELEASE_TICKET_MERGE_METHOD` | `merge` | How that merge is done: `merge` (a merge commit), `squash` or `rebase`. A refused merge is logged and posts "needs attention". |
-| `RELEASE_MERGE_TO_MAIN` | `false` | Merge the release PR into main, with a merge commit, once every ticket is done and the release head is green. |
-| `RELEASE_PR_LABEL` | `claude-release` | Label of the release -> main PRs. |
-| `RELEASE_CHECK_CMD` | (empty) | Extra check on a release head after the tests, run in its workspace, e.g. `cd backend && poetry run python manage.py makemigrations --check --dry-run`. Django's test run already fails on conflicting migrations. |
+| Setting | Code default | This deployment | Meaning |
+|---|---|---|---|
+| `RELEASE_AUTO_MERGE` | `false` | `true` | Merge a release ticket's PR into its release branch once its gates pass. |
+| `RELEASE_TICKET_MERGE_METHOD` | `merge` | `merge` | How that merge is done: `merge` (a merge commit), `squash` or `rebase`. A refused merge is logged and posts "needs attention". |
+| `RELEASE_MERGE_TO_MAIN` | `false` | `true` | Merge the release PR into main, with a merge commit, once every ticket is done and the release head is green. |
+| `RELEASE_PR_LABEL` | `claude-release` | `claude-release` | Label of the release -> main PRs. |
+| `RELEASE_CHECK_CMD` | (empty) | (empty) | Extra check on a release head after the tests, run in its workspace, e.g. `cd backend && poetry run python manage.py makemigrations --check --dry-run`. Django's test run already fails on conflicting migrations. |
 
 ## Who may merge
 
