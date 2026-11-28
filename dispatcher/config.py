@@ -155,6 +155,8 @@ class Config:
     dashboard_action_log: Path = Path("logs/dashboard-actions.jsonl")
     # systemd user units shown on the Services tab (read with `systemctl --user show` only)
     dashboard_units: tuple[str, ...] = DEFAULT_DASHBOARD_UNITS
+    # The .env this config was loaded from (the dashboard's Settings tab edits it); "" = none.
+    env_file: str = ""
 
     # Knobs the dashboard may edit and the daemon hot-reloads each tick.
     HOT_KEYS = (
@@ -238,6 +240,7 @@ def load(env_file: str | None = ".env") -> Config:
         .expanduser(),
         dashboard_units=tuple(u.strip() for u in _str(src, "DASHBOARD_UNITS", ",".join(DEFAULT_DASHBOARD_UNITS))
                               .split(",") if u.strip()),
+        env_file=env_file or "",
         slack_webhook=_str(src, "SLACK_WEBHOOK_URL"),
         slack_bot_token=_str(src, "SLACK_BOT_TOKEN"),
         db_path=Path(_str(src, "PIPELINE_DB", "pipeline.db")).expanduser(),
